@@ -19,6 +19,7 @@ const form   = qs('#chatForm');
 const btnInsights  = qs('#insightsBtn') || qs('#btnInsights');
 const btnClearLogs = qs('#clearLogsBtn') || qs('#btnClearLogs');
 const panelInsights= qs('#insightsPanel') || qs('#panelInsights');
+const insightsText = panelInsights ? (panelInsights.querySelector('#insightsText') || panelInsights.querySelector('pre')) : null;
 
 // ---------- Session budget ----------
 const Budget = {
@@ -111,12 +112,33 @@ function groundedSystem({ lang, strong }){
 
 // ---------- Server call (SSE) ----------
 async function sendToServerSSE(payload){
-  const res = await fetch('/api/chat', {
-    method:'POST',
-    headers:{ 'Content-Type':'application/json', 'X-CSRF': state.csrf },
-    body: JSON.stringify(payload)
-  });
-  if (!res.ok || !res.body) throw new Error('server_unavailable');
+  let res;
+  try {
+    res = await fetch('/api/chat', {
+      method:'POST',
+      headers:{ 'Content-Type':'application/json', 'X-CSRF': state.csrf },
+      body: JSON.stringify(payload)
+    });
+  } catch (err) {
+    const error = new Error('server_fetch_failed');
+    error.detail = { cause: err };
+    throw error;
+  }
+
+  if (!res.ok || !res.body){
+    const detail = { status: res.status };
+    try {
+      const type = res.headers.get('content-type') || '';
+      if (type.includes('application/json')) {
+        detail.body = await res.json();
+      } else {
+        detail.text = await res.text();
+      }
+    } catch {}
+    const error = new Error('server_http_error');
+    error.detail = detail;
+    throw error;
+  }
 
   const reader = res.body.getReader();
   const dec = new TextDecoder();
@@ -147,6 +169,11 @@ async function sendToServerSSE(payload){
     if (Budget.spent >= Budget.hardCap){
       warn.textContent = 'Session hard cap reached (35k). Further generation disabled.';
     }
+  }
+
+  const packStatus = res.headers.get('X-Pack-Status');
+  if (packStatus === 'pack-unavailable' && !warn.textContent){
+    warn.textContent = 'Knowledge pack unavailable. Using provider or fallback responses only.';
   }
 
   status.textContent='Ready.';
@@ -274,8 +301,8 @@ async function handleSend(){
       csrf: state.csrf,
       hp: hpInput.value || ''
     });
-  } catch {
-    const msg = (state.lang==='es') ? 'Ruta de servidor no disponible en este momento.' : 'Server path unavailable at the moment.';
+  } catch (err){
+    const msg = describeServerError(err);
     add('assistant', msg);
     state.messages.push({ role:'assistant', content: msg });
     if (window.ChattiaLog){
@@ -290,7 +317,7 @@ async function handleSend(){
 
 // ---------- Insights UI wiring ----------
 async function renderInsights(){
-  if (!panelInsights || !window.ChattiaLog) return;
+  if (!panelInsights || !insightsText || !window.ChattiaLog) return;
   const items = await window.ChattiaLog.latest(30);
   const lines = items.map(e => {
     const ts = new Date(e.ts).toLocaleString();
@@ -299,7 +326,7 @@ async function renderInsights(){
     const pvd = e.provider||'';
     return `[${ts}] ${tag} (${tok}t ${pvd}) — ${e.text}`;
   });
-  panelInsights.textContent = lines.join('\n') || 'No logs yet.';
+  insightsText.textContent = lines.join('\n') || 'No logs yet.';
 }
 if (btnInsights && panelInsights){
   btnInsights.addEventListener('click', async ()=>{
@@ -312,7 +339,7 @@ if (btnClearLogs && panelInsights){
   btnClearLogs.addEventListener('click', async ()=>{
     if (!window.ChattiaLog) return;
     await window.ChattiaLog.clear();
-    panelInsights.textContent = 'Logs cleared.';
+    if (insightsText) insightsText.textContent = 'Logs cleared.';
   });
 }
 
@@ -327,3 +354,61 @@ inp.addEventListener('keydown', e=>{
 
 // initial pill sync
 updateBudgetHint();
+
+function describeServerError(err){
+  const fallback = (state.lang==='es') ? 'Ruta de servidor no disponible en este momento.' : 'Server path unavailable at the moment.';
+  const detail = err?.detail || {};
+  const code = detail?.body?.error || detail?.text || '';
+
+  if (err?.message === 'server_fetch_failed'){
+    return (state.lang==='es')
+      ? 'No se pudo contactar al servidor. Revisa tu conexión o despliegue.'
+      : 'Could not reach the server. Check your connection or deployment.';
+  }
+
+  if (err?.message === 'server_http_error' && detail?.status === 502 && code === ''){
+    return (state.lang==='es')
+      ? 'El servidor respondió 502. Verifica que el worker tenga acceso a packs/site-pack.json.'
+      : 'Server responded with 502. Ensure the worker can reach packs/site-pack.json.';
+  }
+
+  const map = {
+    pack_unavailable: {
+      en: 'Knowledge pack unavailable. Host packs/site-pack.json or set PACK_URL.',
+      es: 'Paquete de conocimiento no disponible. Aloja packs/site-pack.json o configura PACK_URL.'
+    },
+    csrf_failed: {
+      en: 'Session mismatch (CSRF). Refresh the page and try again.',
+      es: 'Desfase de sesión (CSRF). Actualiza la página e inténtalo de nuevo.'
+    },
+    rate_limited: {
+      en: 'Too many requests from this IP. Please wait a minute.',
+      es: 'Demasiadas solicitudes desde esta IP. Espera un minuto.'
+    },
+    provider_chain_disabled: {
+      en: 'Provider chain disabled. Enable ENABLE_PROVIDERS=true if escalation is required.',
+      es: 'Cadena de proveedores deshabilitada. Activa ENABLE_PROVIDERS=true si necesitas escalado.'
+    },
+    pack_fetch_failed: {
+      en: 'Knowledge pack fetch failed. Check PACK_URL or static hosting.',
+      es: 'Error al obtener el paquete de conocimiento. Verifica PACK_URL o el hosting estático.'
+    }
+  };
+
+  if (typeof code === 'string'){ 
+    const trimmed = code.trim();
+    if (map[trimmed]){
+      return (state.lang==='es') ? map[trimmed].es : map[trimmed].en;
+    }
+    if (/^[a-z_]+$/.test(trimmed)){
+      return (state.lang==='es')
+        ? `Error del servidor: ${trimmed}.`
+        : `Server reported error: ${trimmed}.`;
+    }
+    if (trimmed){
+      return trimmed;
+    }
+  }
+
+  return fallback;
+}
