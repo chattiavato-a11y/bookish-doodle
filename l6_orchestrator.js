@@ -3,6 +3,7 @@
 
 import { L5Local } from './l5_local_llm.js';
 import { WebLLM } from './l5_webllm.js';
+import { SpeechController } from './speech.js';
 
 // ---------- DOM ----------
 const qs = (s) => document.querySelector(s);
@@ -13,6 +14,8 @@ const status = qs('#status');
 const warn   = qs('#warn');
 const langSel= qs('#langSel');
 const themeBtn = qs('#themeBtn');
+const micBtn = qs('#micBtn');
+const ttsBtn = qs('#ttsBtn');
 const form   = qs('#chatForm');
 
 // Optional Insights UI (we'll gracefully no-op if elements aren't present)
@@ -56,7 +59,8 @@ const state = {
   lang: 'en',
   theme: 'dark',
   csrf: csrfToken(),
-  webllmModel: 'Llama-3.1-8B-Instruct-q4f16_1'
+  webllmModel: 'Llama-3.1-8B-Instruct-q4f16_1',
+  ttsEnabled: false
 };
 
 // ---------- UI wiring ----------
@@ -65,7 +69,24 @@ themeBtn.onclick = () => {
   document.documentElement.dataset.theme = state.theme;
   themeBtn.textContent = state.theme[0].toUpperCase()+state.theme.slice(1);
 };
-langSel.onchange = (e)=> state.lang = e.target.value;
+const speech = new SpeechController({
+  inputEl: inp,
+  statusEl: status,
+  warnEl: warn,
+  micBtn,
+  ttsBtn,
+  state,
+  onFinalTranscript: (text) => {
+    if (inp) {
+      inp.value = text;
+      inp.focus();
+    }
+  }
+});
+langSel.onchange = (e)=> {
+  state.lang = e.target.value;
+  speech.setLang(state.lang);
+};
 
 function add(role, text){
   const d=document.createElement('div');
@@ -112,6 +133,7 @@ function groundedSystem({ lang, strong }){
 
 // ---------- Server call (SSE) ----------
 async function sendToServerSSE(payload){
+  speech.cancelSpeech();
   const res = await fetch('/api/chat', {
     method:'POST',
     headers:{ 'Content-Type':'application/json', 'X-CSRF': state.csrf },
@@ -152,6 +174,7 @@ async function sendToServerSSE(payload){
 
   status.textContent='Ready.';
   state.messages.push({role:'assistant', content: full});
+  speech.narrateAssistant(full, state.lang);
 
   if (window.ChattiaLog){
     window.ChattiaLog.put({
@@ -167,6 +190,8 @@ async function sendToServerSSE(payload){
 async function handleSend(){
   const raw=(inp.value||'').trim();
   if (!raw) return;
+
+  speech.cancelSpeech();
 
   const v = window.Shield.scanAndSanitize(raw);
   if (!v.ok){ warn.textContent='Blocked input.'; return; }
@@ -188,6 +213,7 @@ async function handleSend(){
   status.textContent='Searching locally…';
   const draft = await L5Local.draft({ query: v.sanitized, lang: state.lang, bm25Min:0.6, coverageNeeded:2 });
   if (draft){
+    speech.cancelSpeech();
     status.textContent='Streaming…';
     const aiEl = add('assistant','');
     let i=0;
@@ -199,6 +225,7 @@ async function handleSend(){
       } else {
         status.textContent='Ready.';
         state.messages.push({ role:'assistant', content: aiEl.textContent });
+        speech.narrateAssistant(aiEl.textContent, state.lang);
         if (window.ChattiaLog){
           window.ChattiaLog.put({
             role: 'assistant', text: aiEl.textContent, lang: state.lang,
@@ -219,6 +246,7 @@ async function handleSend(){
       status.textContent='Stopped.';
       return;
     }
+    speech.cancelSpeech();
     status.textContent='Loading local model…';
     try {
       await WebLLM.load({
@@ -252,6 +280,7 @@ async function handleSend(){
         Budget.note(streamed);
         status.textContent=`Ready. (≈${Budget.spent}/${Budget.hardCap})`;
         state.messages.push({ role:'assistant', content: aiEl.textContent });
+        speech.narrateAssistant(aiEl.textContent, state.lang);
         if (window.ChattiaLog){
           window.ChattiaLog.put({
             role: 'assistant', text: aiEl.textContent, lang: state.lang,
@@ -277,8 +306,10 @@ async function handleSend(){
     });
   } catch {
     const msg = (state.lang==='es') ? 'Ruta de servidor no disponible en este momento.' : 'Server path unavailable at the moment.';
+    speech.cancelSpeech();
     add('assistant', msg);
     state.messages.push({ role:'assistant', content: msg });
+    speech.narrateAssistant(msg, state.lang);
     if (window.ChattiaLog){
       window.ChattiaLog.put({
         role: 'assistant', text: msg, lang: state.lang,

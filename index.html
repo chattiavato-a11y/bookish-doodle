@@ -17,8 +17,11 @@
   .msg{margin:8px 0;padding:10px 12px;border-radius:10px;white-space:pre-wrap}
   .me{background:rgba(106,209,255,.08);border:1px solid rgba(106,209,255,.25)}
   .ai{background:rgba(255,255,255,.03);border:1px solid #2a2d3b}
-  .bar{display:flex;gap:8px;margin-top:10px}
+  .bar{display:flex;gap:8px;margin-top:10px;align-items:flex-end;flex-wrap:wrap}
   .bar textarea{flex:1;min-height:44px;max-height:160px;resize:vertical;background:var(--card);color:var(--ink);border:1px solid #242634;border-radius:10px;padding:10px}
+  .bar .icon{display:flex;align-items:center;justify-content:center;min-width:44px;min-height:44px;padding:0;font-size:20px}
+  .bar-actions{display:flex;flex-direction:column;gap:6px}
+  @media (max-width:600px){ .bar{align-items:stretch;} .bar-actions{flex-direction:row;} }
   .muted{color:var(--muted);font-size:12px}
   .bad{color:#ff7b7b}
   /* Insights panel */
@@ -46,8 +49,12 @@
   <form id="chatForm" onsubmit="return false">
     <div id="chat" class="chat" role="log" aria-live="polite"></div>
     <div class="bar">
+      <button id="micBtn" class="icon" type="button" aria-pressed="false" title="Start or stop speech input">🎙️</button>
       <textarea id="input" placeholder="Ask about OPS…"></textarea>
-      <button id="send">Send</button>
+      <div class="bar-actions">
+        <button id="ttsBtn" class="icon" type="button" aria-pressed="false" title="Toggle narration">🔇 Off</button>
+        <button id="send">Send</button>
+      </div>
     </div>
     <div class="muted" id="status"></div>
     <div class="bad" id="warn"></div>
