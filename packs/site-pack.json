@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "docs": [
+    {
+      "title": "OPS Website — Hero",
+      "lang": "en",
+      "chunks": [
+        { "id": "w1", "text": "Ops Online Support helps teams keep momentum by handling operations so you can focus on growth." },
+        { "id": "w2", "text": "Service pillars: Business Operations, Contact Center, IT Support, Professionals On-Demand." }
+      ]
+    },
+    {
+      "title": "OPS — Contact",
+      "lang": "en",
+      "chunks": [
+        { "id": "c1", "text": "Contact us via our form and we will respond promptly with clear scopes and timelines." }
+      ]
+    },
+    {
+      "title": "OPS — Unete",
+      "lang": "es",
+      "chunks": [
+        { "id": "j1", "text": "Únete como profesional remoto: operaciones, contact center, soporte TI y profesionales bajo demanda." }
+      ]
+    }
+  ]
+}
