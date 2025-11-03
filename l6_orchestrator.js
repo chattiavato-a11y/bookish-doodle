@@ -193,7 +193,7 @@ async function handleSend(){
 
   // 1) L5 (client)
   status.textContent='Searching locally…';
-  const draft = await L5Local.draft({ query: v.sanitized, lang: state.lang, bm25Min:0.6, coverageNeeded:2 });
+  const draft = await L5Local.draft({ query: v.sanitized, lang: state.lang, bm25Min:0.75, coverageNeeded:2 });
   if (draft){
     status.textContent='Streaming…';
     const aiEl = add('assistant','');
