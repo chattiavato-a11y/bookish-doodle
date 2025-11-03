@@ -1,8 +1,5 @@
 // speech.js
 // Centralized speech controls (STT + TTS) for the chat experience.
-
-// speech.js
-// Centralized speech controls (STT + TTS) for the chat experience.
 // - Browser-native only (no vendors)
 // - Secure-context guard (HTTPS/localhost)
 // - Detailed error messages
