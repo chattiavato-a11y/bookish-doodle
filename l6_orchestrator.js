@@ -110,6 +110,18 @@ function groundedSystem({ lang, strong }){
   return `${policy}\n${style}\n\nContext:\n${ctx}`;
 }
 
+async function offlinePackFallback({ query, lang }){
+  const strong = await deriveStrong({ query, lang });
+  if (!strong.length) return null;
+
+  const lead = (lang==='es')
+    ? 'Modo fuera de línea: respondiendo solo con el paquete local. Arranca el worker /api/chat para habilitar proveedores.'
+    : 'Offline mode: responding only with the local knowledge pack. Start the /api/chat worker to enable providers.';
+
+  const body = strong.map(t => `[#${t.id}] ${t.text}`).join('\n\n');
+  return `${lead}\n\n${body}`;
+}
+
 // ---------- Server call (SSE) ----------
 async function sendToServerSSE(payload){
   let res;
@@ -302,6 +314,23 @@ async function handleSend(){
       hp: hpInput.value || ''
     });
   } catch (err){
+    const offline = await offlinePackFallback({ query: v.sanitized, lang: state.lang });
+    if (offline){
+      warn.textContent = (state.lang==='es')
+        ? 'El servidor /api/chat no respondió; mostrando contenido local.'
+        : 'The /api/chat server did not respond; showing local content.';
+      add('assistant', offline);
+      state.messages.push({ role:'assistant', content: offline });
+      if (window.ChattiaLog){
+        window.ChattiaLog.put({
+          role: 'assistant', text: offline, lang: state.lang,
+          path: 'offline-pack', tokens: Budget.approxTokens(offline), provider: 'none', sessionTotal: Budget.spent
+        });
+      }
+      status.textContent = (state.lang==='es') ? 'Listo (sin servidor).' : 'Ready (offline).';
+      return;
+    }
+
     const msg = describeServerError(err);
     add('assistant', msg);
     state.messages.push({ role:'assistant', content: msg });
@@ -370,6 +399,12 @@ function describeServerError(err){
     return (state.lang==='es')
       ? 'El servidor respondió 502. Verifica que el worker tenga acceso a packs/site-pack.json.'
       : 'Server responded with 502. Ensure the worker can reach packs/site-pack.json.';
+  }
+
+  if (err?.message === 'server_http_error' && detail?.status === 404){
+    return (state.lang==='es')
+      ? 'Ruta /api/chat no encontrada. Ejecuta `wrangler dev` o despliega el worker server_edge.js.'
+      : 'Route /api/chat not found. Run `wrangler dev` or deploy the server_edge.js worker.';
   }
 
   const map = {
