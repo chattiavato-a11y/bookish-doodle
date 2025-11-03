@@ -258,44 +258,72 @@ export default {
       return sseString(refuse, { ...cors, "X-Provider":"policy", "X-Tokens-This-Call":"0", "X-Session-Total":"0" });
     }
 
-    const packUrl = (env?.PACK_URL && String(env.PACK_URL).trim()) || `${url.origin}/packs/site-pack.json`;
-    let pack; try { pack = await loadPack(packUrl); } catch { return bad(502,"pack_unavailable",cors); }
-    const strong = topChunks(pack, userMsg, lang);
+    const bodyPackUrl = typeof body.packUrl === 'string' ? body.packUrl.trim() : '';
+    let packUrl = (env?.PACK_URL && String(env.PACK_URL).trim()) || `${url.origin}/packs/site-pack.json`;
+    if (bodyPackUrl) {
+      try {
+        const normalizedURL = new URL(bodyPackUrl, url.origin);
+        if (normalizedURL.origin === url.origin) {
+          packUrl = normalizedURL.toString();
+        }
+      } catch {
+        // keep env/default pack URL when client provides malformed value
+      }
+    }
+    let pack, packLoaded = true;
+    try {
+      pack = await loadPack(packUrl);
+    } catch {
+      packLoaded = false;
+      pack = null;
+    }
+    const strong = pack ? topChunks(pack, userMsg, lang) : [];
     const extractive = composeExtractive(strong, lang);
     const coverageOK = strong.length >= 2;
     const sid = String(body?.csrf||"anon");
     const ctr = getCounters(sid);
 
+    const packHeader = { 'X-Pack-URL': packUrl };
+
     if (coverageOK && extractive){
       const used = approxTokens(userMsg, extractive);
       if (ctr.session + used <= SESSION_HARD) ctr.session += used;
       return sseString(extractive, {
-        ...cors, "X-Provider":"l5-server", "X-Tokens-This-Call":String(used),
+        ...cors, ...packHeader,
+        "X-Provider":"l5-server", "X-Tokens-This-Call":String(used),
         "X-Provider-Total":"0", "X-Session-Total":String(ctr.session),
-        "X-Provider-Notice":"providers-not-used"
+        "X-Provider-Notice":"providers-not-used",
+        "X-Pack-Status": packLoaded ? "ok" : "pack-unavailable"
       });
     }
 
     const { text, used, provider } = await runProviderChain({ env, userMsg, lang, strong, sid });
     if (!text){
       const fallback = lang==="es"
-        ? "No tengo suficiente información local y los proveedores no están disponibles. [#none]"
-        : "I don’t have enough local info and providers are unavailable. [#none]";
+        ? (packLoaded
+          ? "No tengo suficiente información local y los proveedores no están disponibles. [#none]"
+          : "El paquete de conocimiento no está disponible y tampoco hay proveedores activos. [#none]")
+        : (packLoaded
+          ? "I don’t have enough local info and providers are unavailable. [#none]"
+          : "The knowledge pack is unavailable and no providers are active. [#none]");
       const used0 = approxTokens(userMsg, fallback);
       return sseString(fallback, {
-        ...cors, "X-Provider":"none", "X-Tokens-This-Call":String(used0),
-        "X-Provider-Total":"0", "X-Session-Total":String(ctr.session)
+        ...cors, ...packHeader,
+        "X-Provider":"none", "X-Tokens-This-Call":String(used0),
+        "X-Provider-Total":"0", "X-Session-Total":String(ctr.session),
+        "X-Pack-Status": packLoaded ? "ok" : "pack-unavailable"
       });
     }
 
     // provider success
     return sseString(text, {
-      ...cors,
+      ...cors, ...packHeader,
       "X-Provider": provider,
       "X-Tokens-This-Call": String(used),
       "X-Provider-Total": String(getCounters(sid).per[provider]||0),
       "X-Session-Total": String(getCounters(sid).session),
-      "X-Provider-Notice": (getCounters(sid).per[provider] >= PROVIDER_SOFT) ? "provider-soft-cap-reached" : ""
+      "X-Provider-Notice": (getCounters(sid).per[provider] >= PROVIDER_SOFT) ? "provider-soft-cap-reached" : "",
+      "X-Pack-Status": packLoaded ? "ok" : "pack-unavailable"
     });
   }
 };

@@ -2,6 +2,23 @@
 // Local WebLLM adapter — loaded only on low confidence. You host assets under /static/webllm/...
 
 export const WebLLM = (() => {
+  const pageBase = (() => {
+    if (typeof window !== 'undefined' && window.location){
+      try { return new URL('.', window.location.href); } catch {}
+    }
+    if (typeof document !== 'undefined' && document.baseURI){
+      try { return new URL('.', document.baseURI); } catch {}
+    }
+    return new URL('.', 'https://localhost/');
+  })();
+
+  const cfg = window.__CHATTIA_CONFIG__ || {};
+  const ensureSlash = (value) => value.endsWith('/') ? value : `${value}/`;
+  const SCRIPT_URL = cfg.webllmScript || window.__CHATTIA_WEBLLM_SCRIPT || new URL('./static/webllm/web-llm.min.js', pageBase).toString();
+  const ASSET_BASE = ensureSlash(cfg.webllmAssets || window.__CHATTIA_WEBLLM_ASSETS || new URL('./static/webllm/models/', pageBase).toString());
+  window.__CHATTIA_WEBLLM_SCRIPT = SCRIPT_URL;
+  window.__CHATTIA_WEBLLM_ASSETS = ASSET_BASE;
+
   let engine = null;
   let ready = false;
   let currentModel = null;
@@ -12,7 +29,7 @@ export const WebLLM = (() => {
     if (window.webllm || window.mlc) return;
     await new Promise((resolve, reject)=>{
       const s = document.createElement('script');
-      s.src = '/static/webllm/web-llm.min.js';
+      s.src = SCRIPT_URL;
       s.onload = resolve; s.onerror = reject; document.head.appendChild(s);
     });
   }
@@ -38,7 +55,7 @@ export const WebLLM = (() => {
     }
     if (window.mlc && typeof window.mlc.createMLCEngine === 'function'){
       const eng = await window.mlc.createMLCEngine(modelId, {
-        assetBaseUrl: '/static/webllm/models/',
+        assetBaseUrl: ASSET_BASE,
         initProgressCallback: p => onProgress && onProgress(p)
       });
       if (!eng.chat?.completions?.create){
