@@ -4,6 +4,42 @@
 import { L5Local } from './l5_local_llm.js';
 import { WebLLM } from './l5_webllm.js';
 
+// ---------- URL helpers ----------
+const pageBase = (() => {
+  if (typeof window !== 'undefined' && window.location){
+    try { return new URL('.', window.location.href); } catch {}
+  }
+  if (typeof document !== 'undefined' && document.baseURI){
+    try { return new URL('.', document.baseURI); } catch {}
+  }
+  return new URL('.', 'https://localhost/');
+})();
+
+const Config = (() => {
+  const prior = window.__CHATTIA_CONFIG__ || {};
+  const apiURL = prior.apiURL
+    || window.__CHATTIA_API_URL
+    || new URL('./api/chat', pageBase).toString();
+  const packURL = prior.packURL
+    || window.__CHATTIA_PACK_URL
+    || new URL('./packs/site-pack.json', pageBase).toString();
+  const webllmScript = prior.webllmScript
+    || window.__CHATTIA_WEBLLM_SCRIPT
+    || new URL('./static/webllm/web-llm.min.js', pageBase).toString();
+  const ensureSlash = (value) => value.endsWith('/') ? value : `${value}/`;
+  const webllmAssets = ensureSlash(prior.webllmAssets
+    || window.__CHATTIA_WEBLLM_ASSETS
+    || new URL('./static/webllm/models/', pageBase).toString());
+
+  const merged = { apiURL, packURL, webllmScript, webllmAssets };
+  window.__CHATTIA_CONFIG__ = merged;
+  window.__CHATTIA_API_URL = apiURL;
+  window.__CHATTIA_PACK_URL = packURL;
+  window.__CHATTIA_WEBLLM_SCRIPT = webllmScript;
+  window.__CHATTIA_WEBLLM_ASSETS = webllmAssets;
+  return merged;
+})();
+
 // ---------- DOM ----------
 const qs = (s) => document.querySelector(s);
 const chat   = qs('#chat');
@@ -79,26 +115,31 @@ function add(role, text){
 // ---------- Pack helpers ----------
 async function loadPack(){
   if (window.__PACK__) return window.__PACK__;
-  const r = await fetch('/packs/site-pack.json', { headers:{'Accept':'application/json'} });
+  const r = await fetch(Config.packURL, { headers:{'Accept':'application/json'} });
   if (!r.ok) throw new Error('pack_load_failed');
   window.__PACK__ = await r.json();
   return window.__PACK__;
 }
 function tokenize(s){ return (s||'').toLowerCase().normalize('NFKC').match(/[a-z0-9áéíóúüñ]+/gi)||[]; }
+
+function strongFromPack(pack, { query, lang }){
+  const terms = tokenize(query);
+  const list=[];
+  for (const d of (pack?.docs||[])){
+    if (lang && d.lang && d.lang!==lang) continue;
+    for (const c of (d.chunks||[])){
+      const t = tokenize(c.text);
+      let score=0; for (const w of terms) if (t.includes(w)) score++;
+      if (score>0) list.push({ id:c.id, text:c.text, score });
+    }
+  }
+  return list.sort((a,b)=>b.score-a.score).slice(0,4);
+}
+
 async function deriveStrong({ query, lang }){
   try{
     const pack = await loadPack();
-    const terms = tokenize(query);
-    const list=[];
-    for (const d of (pack.docs||[])){
-      if (lang && d.lang && d.lang!==lang) continue;
-      for (const c of (d.chunks||[])){
-        const t = tokenize(c.text);
-        let score=0; for (const w of terms) if (t.includes(w)) score++;
-        if (score>0) list.push({ id:c.id, text:c.text, score });
-      }
-    }
-    return list.sort((a,b)=>b.score-a.score).slice(0,4);
+    return strongFromPack(pack, { query, lang });
   } catch { return []; }
 }
 function groundedSystem({ lang, strong }){
@@ -111,34 +152,49 @@ function groundedSystem({ lang, strong }){
 }
 
 async function offlinePackFallback({ query, lang }){
-  const strong = await deriveStrong({ query, lang });
-  if (!strong.length) return null;
+  let pack;
+  try {
+    pack = await loadPack();
+  } catch {
+    const text = (lang==='es')
+      ? 'Modo fuera de línea: no se pudo cargar packs/site-pack.json. Asegura el hosting estático o configura PACK_URL.'
+      : 'Offline mode: packs/site-pack.json could not be loaded. Host the static pack or set PACK_URL.';
+    return { text, reason: 'pack-load-failed' };
+  }
+
+  const strong = strongFromPack(pack, { query, lang });
+  if (!strong.length){
+    const text = (lang==='es')
+      ? 'Modo fuera de línea: no hay suficiente contexto local para esta consulta. Arranca el worker /api/chat para proveedores.'
+      : 'Offline mode: the local knowledge pack has no matches for this query. Start the /api/chat worker for providers.';
+    return { text, reason: 'no-local-match' };
+  }
 
   const lead = (lang==='es')
     ? 'Modo fuera de línea: respondiendo solo con el paquete local. Arranca el worker /api/chat para habilitar proveedores.'
     : 'Offline mode: responding only with the local knowledge pack. Start the /api/chat worker to enable providers.';
 
   const body = strong.map(t => `[#${t.id}] ${t.text}`).join('\n\n');
-  return `${lead}\n\n${body}`;
+  return { text: `${lead}\n\n${body}`, reason: 'local-context', strongCount: strong.length };
 }
 
 // ---------- Server call (SSE) ----------
 async function sendToServerSSE(payload){
   let res;
   try {
-    res = await fetch('/api/chat', {
+    res = await fetch(Config.apiURL, {
       method:'POST',
       headers:{ 'Content-Type':'application/json', 'X-CSRF': state.csrf },
       body: JSON.stringify(payload)
     });
   } catch (err) {
     const error = new Error('server_fetch_failed');
-    error.detail = { cause: err };
+    error.detail = { cause: err, apiURL: Config.apiURL };
     throw error;
   }
 
   if (!res.ok || !res.body){
-    const detail = { status: res.status };
+    const detail = { status: res.status, apiURL: Config.apiURL };
     try {
       const type = res.headers.get('content-type') || '';
       if (type.includes('application/json')) {
@@ -184,6 +240,20 @@ async function sendToServerSSE(payload){
   }
 
   const packStatus = res.headers.get('X-Pack-Status');
+  const packUrlHint = res.headers.get('X-Pack-URL');
+  if (packUrlHint && packUrlHint !== Config.packURL){
+    const prev = Config.packURL;
+    Config.packURL = packUrlHint;
+    window.__CHATTIA_PACK_URL = packUrlHint;
+    if (window.__CHATTIA_CONFIG__){
+      window.__CHATTIA_CONFIG__.packURL = packUrlHint;
+    } else {
+      window.__CHATTIA_CONFIG__ = { packURL: packUrlHint };
+    }
+    if (window.__PACK__ && prev !== packUrlHint){
+      window.__PACK__ = null;
+    }
+  }
   if (packStatus === 'pack-unavailable' && !warn.textContent){
     warn.textContent = 'Knowledge pack unavailable. Using provider or fallback responses only.';
   }
@@ -311,23 +381,40 @@ async function handleSend(){
       messages: state.messages.slice(-16),
       lang: state.lang,
       csrf: state.csrf,
-      hp: hpInput.value || ''
+      hp: hpInput.value || '',
+      packUrl: Config.packURL
     });
   } catch (err){
     const offline = await offlinePackFallback({ query: v.sanitized, lang: state.lang });
     if (offline){
-      warn.textContent = (state.lang==='es')
-        ? 'El servidor /api/chat no respondió; mostrando contenido local.'
-        : 'The /api/chat server did not respond; showing local content.';
-      add('assistant', offline);
-      state.messages.push({ role:'assistant', content: offline });
+      const { text, reason } = offline;
+      if (reason === 'pack-load-failed'){
+        warn.textContent = (state.lang==='es')
+          ? `No se pudo cargar ${Config.packURL}. Revisa el hosting o PACK_URL.`
+          : `${Config.packURL} could not be loaded. Check hosting or PACK_URL.`;
+      } else if (reason === 'no-local-match'){
+        warn.textContent = (state.lang==='es')
+          ? 'Sin coincidencias locales. Arranca /api/chat para escalar a proveedores.'
+          : 'No local matches. Start /api/chat to escalate to providers.';
+      } else {
+        warn.textContent = (state.lang==='es')
+          ? 'El servidor /api/chat no respondió; mostrando contexto local.'
+          : 'The /api/chat server did not respond; showing local context.';
+      }
+      add('assistant', text);
+      state.messages.push({ role:'assistant', content: text });
       if (window.ChattiaLog){
+        const tokens = Budget.approxTokens(text);
+        const meta = { reason };
+        if (typeof offline.strongCount === 'number') meta.strong = offline.strongCount;
         window.ChattiaLog.put({
-          role: 'assistant', text: offline, lang: state.lang,
-          path: 'offline-pack', tokens: Budget.approxTokens(offline), provider: 'none', sessionTotal: Budget.spent
+          role: 'assistant', text, lang: state.lang,
+          path: 'offline-pack', tokens, provider: 'none', sessionTotal: Budget.spent, meta
         });
       }
-      status.textContent = (state.lang==='es') ? 'Listo (sin servidor).' : 'Ready (offline).';
+      status.textContent = (state.lang==='es')
+        ? (reason === 'pack-load-failed' ? 'Listo (sin pack).' : 'Listo (sin servidor).')
+        : (reason === 'pack-load-failed' ? 'Ready (pack offline).' : 'Ready (offline).');
       return;
     }
 
@@ -353,7 +440,8 @@ async function renderInsights(){
     const tag = `${e.role}@${e.path}`;
     const tok = (e.tokens||0);
     const pvd = e.provider||'';
-    return `[${ts}] ${tag} (${tok}t ${pvd}) — ${e.text}`;
+    const meta = e.meta?.reason ? ` {${e.meta.reason}${typeof e.meta.strong==='number'?`,${e.meta.strong}`:''}}` : '';
+    return `[${ts}] ${tag} (${tok}t ${pvd})${meta} — ${e.text}`;
   });
   insightsText.textContent = lines.join('\n') || 'No logs yet.';
 }
@@ -385,14 +473,17 @@ inp.addEventListener('keydown', e=>{
 updateBudgetHint();
 
 function describeServerError(err){
-  const fallback = (state.lang==='es') ? 'Ruta de servidor no disponible en este momento.' : 'Server path unavailable at the moment.';
+  const fallback = (state.lang==='es')
+    ? `Ruta de servidor no disponible en este momento (${Config.apiURL}).`
+    : `Server path unavailable at the moment (${Config.apiURL}).`;
   const detail = err?.detail || {};
   const code = detail?.body?.error || detail?.text || '';
 
   if (err?.message === 'server_fetch_failed'){
+    const target = err?.detail?.apiURL || Config.apiURL;
     return (state.lang==='es')
-      ? 'No se pudo contactar al servidor. Revisa tu conexión o despliegue.'
-      : 'Could not reach the server. Check your connection or deployment.';
+      ? `No se pudo contactar al servidor (${target}). Revisa tu conexión o despliegue.`
+      : `Could not reach the server (${target}). Check your connection or deployment.`;
   }
 
   if (err?.message === 'server_http_error' && detail?.status === 502 && code === ''){
@@ -403,14 +494,14 @@ function describeServerError(err){
 
   if (err?.message === 'server_http_error' && detail?.status === 404){
     return (state.lang==='es')
-      ? 'Ruta /api/chat no encontrada. Ejecuta `wrangler dev` o despliega el worker server_edge.js.'
-      : 'Route /api/chat not found. Run `wrangler dev` or deploy the server_edge.js worker.';
+      ? `Ruta ${Config.apiURL} no encontrada. Ejecuta \`wrangler dev\` o despliega el worker server_edge.js.`
+      : `Route ${Config.apiURL} not found. Run \`wrangler dev\` or deploy the server_edge.js worker.`;
   }
 
   const map = {
     pack_unavailable: {
-      en: 'Knowledge pack unavailable. Host packs/site-pack.json or set PACK_URL.',
-      es: 'Paquete de conocimiento no disponible. Aloja packs/site-pack.json o configura PACK_URL.'
+      en: `Knowledge pack unavailable (${Config.packURL}). Host packs/site-pack.json or set PACK_URL.`,
+      es: `Paquete de conocimiento no disponible (${Config.packURL}). Aloja packs/site-pack.json o configura PACK_URL.`
     },
     csrf_failed: {
       en: 'Session mismatch (CSRF). Refresh the page and try again.',
@@ -425,8 +516,8 @@ function describeServerError(err){
       es: 'Cadena de proveedores deshabilitada. Activa ENABLE_PROVIDERS=true si necesitas escalado.'
     },
     pack_fetch_failed: {
-      en: 'Knowledge pack fetch failed. Check PACK_URL or static hosting.',
-      es: 'Error al obtener el paquete de conocimiento. Verifica PACK_URL o el hosting estático.'
+      en: `Knowledge pack fetch failed (${Config.packURL}). Check PACK_URL or static hosting.`,
+      es: `Error al obtener el paquete de conocimiento (${Config.packURL}). Verifica PACK_URL o el hosting estático.`
     }
   };
 

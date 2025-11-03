@@ -258,7 +258,18 @@ export default {
       return sseString(refuse, { ...cors, "X-Provider":"policy", "X-Tokens-This-Call":"0", "X-Session-Total":"0" });
     }
 
-    const packUrl = (env?.PACK_URL && String(env.PACK_URL).trim()) || `${url.origin}/packs/site-pack.json`;
+    const bodyPackUrl = typeof body.packUrl === 'string' ? body.packUrl.trim() : '';
+    let packUrl = (env?.PACK_URL && String(env.PACK_URL).trim()) || `${url.origin}/packs/site-pack.json`;
+    if (bodyPackUrl) {
+      try {
+        const normalizedURL = new URL(bodyPackUrl, url.origin);
+        if (normalizedURL.origin === url.origin) {
+          packUrl = normalizedURL.toString();
+        }
+      } catch {
+        // keep env/default pack URL when client provides malformed value
+      }
+    }
     let pack, packLoaded = true;
     try {
       pack = await loadPack(packUrl);
@@ -272,11 +283,14 @@ export default {
     const sid = String(body?.csrf||"anon");
     const ctr = getCounters(sid);
 
+    const packHeader = { 'X-Pack-URL': packUrl };
+
     if (coverageOK && extractive){
       const used = approxTokens(userMsg, extractive);
       if (ctr.session + used <= SESSION_HARD) ctr.session += used;
       return sseString(extractive, {
-        ...cors, "X-Provider":"l5-server", "X-Tokens-This-Call":String(used),
+        ...cors, ...packHeader,
+        "X-Provider":"l5-server", "X-Tokens-This-Call":String(used),
         "X-Provider-Total":"0", "X-Session-Total":String(ctr.session),
         "X-Provider-Notice":"providers-not-used",
         "X-Pack-Status": packLoaded ? "ok" : "pack-unavailable"
@@ -294,7 +308,8 @@ export default {
           : "The knowledge pack is unavailable and no providers are active. [#none]");
       const used0 = approxTokens(userMsg, fallback);
       return sseString(fallback, {
-        ...cors, "X-Provider":"none", "X-Tokens-This-Call":String(used0),
+        ...cors, ...packHeader,
+        "X-Provider":"none", "X-Tokens-This-Call":String(used0),
         "X-Provider-Total":"0", "X-Session-Total":String(ctr.session),
         "X-Pack-Status": packLoaded ? "ok" : "pack-unavailable"
       });
@@ -302,7 +317,7 @@ export default {
 
     // provider success
     return sseString(text, {
-      ...cors,
+      ...cors, ...packHeader,
       "X-Provider": provider,
       "X-Tokens-This-Call": String(used),
       "X-Provider-Total": String(getCounters(sid).per[provider]||0),

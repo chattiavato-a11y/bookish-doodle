@@ -2,9 +2,28 @@
 // Local retrieval + extractive drafting used before any escalation.
 
 export const L5Local = (() => {
+  const pageBase = (() => {
+    if (typeof window !== 'undefined' && window.location){
+      try { return new URL('.', window.location.href); } catch {}
+    }
+    if (typeof document !== 'undefined' && document.baseURI){
+      try { return new URL('.', document.baseURI); } catch {}
+    }
+    return new URL('.', 'https://localhost/');
+  })();
+
+  const PACK_URL = (() => {
+    const cfg = window.__CHATTIA_CONFIG__ || {};
+    const existing = cfg.packURL || window.__CHATTIA_PACK_URL;
+    if (existing) return existing;
+    const derived = new URL('./packs/site-pack.json', pageBase).toString();
+    window.__CHATTIA_PACK_URL = derived;
+    return derived;
+  })();
+
   async function loadPack() {
     if (window.__PACK__) return window.__PACK__;
-    const r = await fetch('/packs/site-pack.json', { headers: { 'Accept': 'application/json' } });
+    const r = await fetch(PACK_URL, { headers: { 'Accept': 'application/json' } });
     if (!r.ok) throw new Error('pack_load_failed');
     window.__PACK__ = await r.json();
     return window.__PACK__;
