@@ -1,26 +1,16 @@
-// log_store.js
-// Local-only interaction recorder for Chattia.
-// Stores conversations in IndexedDB ("chattia_logs") -> "events".
-// Fields per entry:
-//  ts, role, text, lang, path, tokens, provider, sessionTotal
-// No remote calls. No downloads.
+// log_store.js — local-only logs in IndexedDB, with clear()
 
 const ChattiaLog = (() => {
   const DB_NAME = 'chattia_logs';
   const DB_VER  = 1;
   const ST_NAME = 'events';
-
   let dbPromise = null;
-  let mem = []; // fallback in case IndexedDB is not available
+  let mem = [];
 
-  function hasIDB(){
-    return typeof indexedDB !== 'undefined';
-  }
+  function hasIDB(){ return typeof indexedDB !== 'undefined'; }
 
   function openDB(){
-    if (!hasIDB()){
-      return Promise.resolve(null);
-    }
+    if (!hasIDB()) return Promise.resolve(null);
     if (dbPromise) return dbPromise;
     dbPromise = new Promise((resolve, reject)=>{
       const req = indexedDB.open(DB_NAME, DB_VER);
@@ -38,51 +28,45 @@ const ChattiaLog = (() => {
   }
 
   async function put(entry){
-    const rec = {
-      ts: Date.now(),
-      ...entry
-    };
+    const rec = { ts: Date.now(), ...entry };
     const db = await openDB();
-    if (!db){
-      // fallback to memory (kept small)
-      mem.push(rec);
-      if (mem.length > 500) mem.shift();
-      return;
-    }
-    return new Promise((resolve, reject)=>{
+    if (!db){ mem.push(rec); if (mem.length>500) mem.shift(); return; }
+    await new Promise((resolve, reject)=>{
       const tx = db.transaction(ST_NAME, 'readwrite');
-      const st = tx.objectStore(ST_NAME);
-      st.add(rec);
-      tx.oncomplete = ()=> resolve();
-      tx.onerror = ()=> reject(tx.error);
+      tx.objectStore(ST_NAME).add(rec);
+      tx.oncomplete = resolve; tx.onerror = ()=> reject(tx.error);
     });
   }
 
   async function latest(limit=50){
     const db = await openDB();
-    if (!db){
-      return mem.slice(-limit);
-    }
-    return new Promise((resolve, reject)=>{
+    if (!db) return mem.slice(-limit).reverse();
+    return await new Promise((resolve, reject)=>{
+      const out = [];
       const tx = db.transaction(ST_NAME, 'readonly');
-      const st = tx.objectStore(ST_NAME);
-      const idx = st.index('by_ts');
-      const res = [];
-      const cursorReq = idx.openCursor(null, 'prev');
-      cursorReq.onsuccess = (ev)=>{
-        const cursor = ev.target.result;
-        if (!cursor || res.length >= limit){
-          resolve(res);
-          return;
-        }
-        res.push(cursor.value);
-        cursor.continue();
+      const idx = tx.objectStore(ST_NAME).index('by_ts');
+      const cur = idx.openCursor(null, 'prev');
+      cur.onsuccess = (e)=>{
+        const c = e.target.result;
+        if (!c || out.length>=limit){ resolve(out); return; }
+        out.push(c.value); c.continue();
       };
-      cursorReq.onerror = ()=> reject(cursorReq.error);
+      cur.onerror = ()=> reject(cur.error);
     });
   }
 
-  return { put, latest };
-})();
+  async function clear(){
+    const db = await openDB();
+    mem = [];
+    if (!db) return;
+    await new Promise((resolve, reject)=>{
+      const tx = db.transaction(ST_NAME, 'readwrite');
+      tx.objectStore(ST_NAME).clear();
+      tx.oncomplete = resolve; tx.onerror = ()=> reject(tx.error);
+    });
+  }
 
+  return { put, latest, clear };
+})();
 window.ChattiaLog = ChattiaLog;
+
