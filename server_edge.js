@@ -139,6 +139,15 @@ function getCounters(sid){
   return v;
 }
 
+function spendTokens(ctr, provider, used){
+  const allowance = Math.max(0, SESSION_HARD - ctr.session);
+  if (!allowance) return 0;
+  const spend = Math.min(Math.max(0, Number(used)||0), allowance);
+  ctr.per[provider] = (ctr.per[provider]||0) + spend;
+  ctr.session += spend;
+  return spend;
+}
+
 // ---- Providers (optional) ----
 async function callOpenAICompat({ base, key, model, messages }){
   const url = `${base.replace(/\/+$/,'')}/chat/completions`;
@@ -187,27 +196,28 @@ async function runProviderChain({ env, userMsg, lang, strong, sid }){
   for (const p of chain){
     try{
       if (!(p in ctr.per)) ctr.per[p]=0;
+      if (Math.max(0, SESSION_HARD - ctr.session) === 0) break;
       if (ctr.per[p] >= PROVIDER_SOFT) continue;
 
       if (p==="oss" && env?.OSS_BASE_URL && env?.OSS_API_KEY && env?.OSS_MODEL_ID){
         const { text, used } = await callOpenAICompat({ base: env.OSS_BASE_URL, key: env.OSS_API_KEY, model: env.OSS_MODEL_ID, messages });
-        if (ctr.session + used > SESSION_HARD) used = Math.max(0, SESSION_HARD-ctr.session);
-        ctr.per[p] += used; ctr.session += used; return { text, used, provider:p };
+        const spend = spendTokens(ctr, p, used);
+        return { text, used: spend, provider:p };
       }
       if (p==="grok" && env?.GROK_BASE_URL && env?.GROK_API_KEY && env?.GROK_MODEL_ID){
         const { text, used } = await callGrok({ base: env.GROK_BASE_URL, key: env.GROK_API_KEY, model: env.GROK_MODEL_ID, messages });
-        if (ctr.session + used > SESSION_HARD) used = Math.max(0, SESSION_HARD-ctr.session);
-        ctr.per[p] += used; ctr.session += used; return { text, used, provider:p };
+        const spend = spendTokens(ctr, p, used);
+        return { text, used: spend, provider:p };
       }
       if (p==="gemini" && env?.GEMINI_BASE_URL && env?.GEMINI_API_KEY && env?.GEMINI_MODEL_ID){
         const { text, used } = await callGemini({ base: env.GEMINI_BASE_URL, key: env.GEMINI_API_KEY, model: env.GEMINI_MODEL_ID, systemText, userText: userMsg });
-        if (ctr.session + used > SESSION_HARD) used = Math.max(0, SESSION_HARD-ctr.session);
-        ctr.per[p] += used; ctr.session += used; return { text, used, provider:p };
+        const spend = spendTokens(ctr, p, used);
+        return { text, used: spend, provider:p };
       }
       if (p==="openai" && env?.OPENAI_BASE_URL && env?.OPENAI_API_KEY && env?.OPENAI_MODEL_ID){
         const { text, used } = await callOpenAI({ base: env.OPENAI_BASE_URL, key: env.OPENAI_API_KEY, model: env.OPENAI_MODEL_ID, messages });
-        if (ctr.session + used > SESSION_HARD) used = Math.max(0, SESSION_HARD-ctr.session);
-        ctr.per[p] += used; ctr.session += used; return { text, used, provider:p };
+        const spend = spendTokens(ctr, p, used);
+        return { text, used: spend, provider:p };
       }
     } catch { /* try next */ }
   }

@@ -19,6 +19,7 @@ const form   = qs('#chatForm');
 const btnInsights  = qs('#insightsBtn') || qs('#btnInsights');
 const btnClearLogs = qs('#clearLogsBtn') || qs('#btnClearLogs');
 const panelInsights= qs('#insightsPanel') || qs('#panelInsights');
+const insightsText = panelInsights ? (panelInsights.querySelector('#insightsText') || panelInsights.querySelector('pre')) : null;
 
 // ---------- Session budget ----------
 const Budget = {
@@ -290,7 +291,7 @@ async function handleSend(){
 
 // ---------- Insights UI wiring ----------
 async function renderInsights(){
-  if (!panelInsights || !window.ChattiaLog) return;
+  if (!panelInsights || !insightsText || !window.ChattiaLog) return;
   const items = await window.ChattiaLog.latest(30);
   const lines = items.map(e => {
     const ts = new Date(e.ts).toLocaleString();
@@ -299,7 +300,7 @@ async function renderInsights(){
     const pvd = e.provider||'';
     return `[${ts}] ${tag} (${tok}t ${pvd}) — ${e.text}`;
   });
-  panelInsights.textContent = lines.join('\n') || 'No logs yet.';
+  insightsText.textContent = lines.join('\n') || 'No logs yet.';
 }
 if (btnInsights && panelInsights){
   btnInsights.addEventListener('click', async ()=>{
@@ -312,7 +313,7 @@ if (btnClearLogs && panelInsights){
   btnClearLogs.addEventListener('click', async ()=>{
     if (!window.ChattiaLog) return;
     await window.ChattiaLog.clear();
-    panelInsights.textContent = 'Logs cleared.';
+    if (insightsText) insightsText.textContent = 'Logs cleared.';
   });
 }
 
