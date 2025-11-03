@@ -2,7 +2,7 @@
 <html lang="en" data-theme="dark">
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Chattia · L1 + L5 + WebLLM (Local)</title>
+<title>Chattia · Local-first + Providers</title>
 <style>
   :root{ --bg:#0b0c10; --card:#121319; --ink:#e6e6e6; --muted:#a9b0b8; --ring:rgba(106,209,255,.35); }
   [data-theme="light"]{ --bg:#ffffff; --card:#f5f7fb; --ink:#1f2430; --muted:#536070; --accent:#0077ff; --ring:rgba(0,119,255,.25); }
@@ -21,20 +21,26 @@
   .bar textarea{flex:1;min-height:44px;max-height:160px;resize:vertical;background:var(--card);color:var(--ink);border:1px solid #242634;border-radius:10px;padding:10px}
   .muted{color:var(--muted);font-size:12px}
   .bad{color:#ff7b7b}
+  /* Insights panel */
+  .insights{display:none;position:fixed;right:20px;bottom:20px;width:360px;max-height:70vh;overflow:auto;background:var(--card);border:1px solid #242634;border-radius:12px;padding:12px;box-shadow:0 8px 28px rgba(0,0,0,.35)}
+  .insights h3{margin:6px 0 8px 0;font-size:14px}
+  .insights pre{white-space:pre-wrap;font-size:12px;color:var(--muted);background:transparent;border:none}
 </style>
 
 <body>
 <div class="wrap">
   <header>
     <div>
-      <strong>Chattia — Local-first (L1 UI + L5 Retrieval → WebLLM on low confidence)</strong><br>
-      <span class="muted">No vendors. WebGPU loads only when needed.</span>
+      <strong>Chattia — L1/L5 → WebLLM → L2/L3/L7</strong><br>
+      <span class="muted">Local-first with grounded citations. Providers on soft caps; session hard cap.</span>
     </div>
     <div class="toggles">
       <button id="themeBtn" aria-pressed="true">Dark</button>
       <label class="muted">Lang</label>
       <select id="langSel"><option value="en" selected>EN</option><option value="es">ES</option></select>
       <div class="pill">Session tokens: <span id="budgetHint">0</span> / 35000</div>
+      <button id="insightsBtn" title="Show local insights">Insights</button>
+      <button id="clearLogsBtn" title="Erase local logs">Clear logs</button>
     </div>
   </header>
 
@@ -44,20 +50,17 @@
       <textarea id="input" placeholder="Ask about OPS…"></textarea>
       <button id="send">Send</button>
     </div>
-    <div class="muted" id="status">Local-only; WebLLM will engage if confidence is low.</div>
+    <div class="muted" id="status">Local-first; token spend only for WebLLM or server.</div>
     <div class="bad" id="warn"></div>
   </form>
 </div>
 
+<div id="insightsPanel" class="insights" aria-live="polite">
+  <h3>Insights (local, private)</h3>
+  <pre id="insightsText">Loading…</pre>
+</div>
+
 <script src="./shield.js"></script>
 <script type="module" src="./l6_orchestrator.js"></script>
-<script>
-  // tiny live counter (reads assistant text length ≈ tokens)
-  setInterval(()=>{
-    const text = Array.from(document.querySelectorAll('.msg.ai')).map(n=>n.textContent||'').join('');
-    document.getElementById('budgetHint').textContent = Math.ceil(text.length/4);
-  }, 800);
-</script>
 </body>
 </html>
-
