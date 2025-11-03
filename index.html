@@ -61,6 +61,13 @@
 </div>
 
 <script src="./shield.js"></script>
+<script src="./log_store.js"></script>
 <script type="module" src="./l6_orchestrator.js"></script>
+<script>
+  setInterval(()=>{
+    const text = Array.from(document.querySelectorAll('.msg.ai')).map(n=>n.textContent||'').join('');
+    const el = document.getElementById('budgetHint');
+    if (el) el.textContent = Math.ceil(text.length/4);
+  }, 800);
 </body>
 </html>
