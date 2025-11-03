@@ -1,6 +1,5 @@
 // l6_orchestrator.js
-// L1 → L5 (client) → WebLLM (local GPU) → /api/chat (server: L2/L3/L7)
-// NOW with local interaction logging (log_store.js)
+// L1 → L5 (client) → WebLLM (local GPU) → /api/chat (server: L2/L3/L7) + local logging + insights
 
 import { L5Local } from './l5_local_llm.js';
 import { WebLLM } from './l5_webllm.js';
@@ -16,7 +15,12 @@ const langSel= qs('#langSel');
 const themeBtn = qs('#themeBtn');
 const form   = qs('#chatForm');
 
-// ---------- Session budget (client view) ----------
+// Optional Insights UI (we'll gracefully no-op if elements aren't present)
+const btnInsights  = qs('#insightsBtn') || qs('#btnInsights');
+const btnClearLogs = qs('#clearLogsBtn') || qs('#btnClearLogs');
+const panelInsights= qs('#insightsPanel') || qs('#panelInsights');
+
+// ---------- Session budget ----------
 const Budget = {
   softWarn: 25000,
   hardCap:  35000,
@@ -62,7 +66,6 @@ themeBtn.onclick = () => {
 };
 langSel.onchange = (e)=> state.lang = e.target.value;
 
-// safe render (never innerHTML)
 function add(role, text){
   const d=document.createElement('div');
   d.className='msg '+(role==='user'?'me':'ai');
@@ -72,7 +75,7 @@ function add(role, text){
   return d;
 }
 
-// ---------- Pack helpers (optional grounding for WebLLM) ----------
+// ---------- Pack helpers ----------
 async function loadPack(){
   if (window.__PACK__) return window.__PACK__;
   const r = await fetch('/packs/site-pack.json', { headers:{'Accept':'application/json'} });
@@ -135,11 +138,9 @@ async function sendToServerSSE(payload){
     }
   }
 
-  // server tokens → client budget
   const used = Number(res.headers.get('X-Tokens-This-Call')||'0')|0;
   if (used > 0) {
-    const before = Budget.spent;
-    Budget.note(used);
+    const before = Budget.spent; Budget.note(used);
     if (before < Budget.softWarn && Budget.spent >= Budget.softWarn){
       warn.textContent = 'Approaching session budget (25k).';
     }
@@ -151,14 +152,10 @@ async function sendToServerSSE(payload){
   status.textContent='Ready.';
   state.messages.push({role:'assistant', content: full});
 
-  // LOG: assistant (server path)
   if (window.ChattiaLog){
     window.ChattiaLog.put({
-      role: 'assistant',
-      text: full,
-      lang: state.lang,
-      path: 'server',
-      tokens: used,
+      role: 'assistant', text: full, lang: state.lang,
+      path: 'server', tokens: used,
       provider: res.headers.get('X-Provider') || 'unknown',
       sessionTotal: Budget.spent
     });
@@ -178,22 +175,17 @@ async function handleSend(){
   state.messages.push({ role:'user', content:v.sanitized, lang: state.lang });
   inp.value='';
 
-  // LOG: user
   if (window.ChattiaLog){
     window.ChattiaLog.put({
-      role: 'user',
-      text: v.sanitized,
-      lang: state.lang,
-      path: 'client',
-      tokens: Budget.approxTokens(v.sanitized),
-      provider: 'n/a',
-      sessionTotal: Budget.spent
+      role: 'user', text: v.sanitized, lang: state.lang,
+      path: 'client', tokens: Budget.approxTokens(v.sanitized),
+      provider: 'n/a', sessionTotal: Budget.spent
     });
   }
 
-  // 1) L5 (client)
+  // 1) L5 client extractive
   status.textContent='Searching locally…';
-  const draft = await L5Local.draft({ query: v.sanitized, lang: state.lang, bm25Min:0.75, coverageNeeded:2 });
+  const draft = await L5Local.draft({ query: v.sanitized, lang: state.lang, bm25Min:0.6, coverageNeeded:2 });
   if (draft){
     status.textContent='Streaming…';
     const aiEl = add('assistant','');
@@ -206,17 +198,11 @@ async function handleSend(){
       } else {
         status.textContent='Ready.';
         state.messages.push({ role:'assistant', content: aiEl.textContent });
-
-        // LOG: assistant (L5 path)
         if (window.ChattiaLog){
           window.ChattiaLog.put({
-            role: 'assistant',
-            text: aiEl.textContent,
-            lang: state.lang,
-            path: 'l5-client',
-            tokens: Budget.approxTokens(aiEl.textContent),
-            provider: 'none',
-            sessionTotal: Budget.spent
+            role: 'assistant', text: aiEl.textContent, lang: state.lang,
+            path: 'l5-client', tokens: Budget.approxTokens(aiEl.textContent),
+            provider: 'none', sessionTotal: Budget.spent
           });
         }
       }
@@ -238,9 +224,7 @@ async function handleSend(){
         model: state.webllmModel,
         progress: p => { status.textContent = `Loading local model… ${Math.round((p?.progress||0)*100)}%`; }
       });
-    } catch {
-      // fall through
-    }
+    } catch { /* fall through */ }
 
     if (WebLLM.ready){
       const strong = await deriveStrong({ query: v.sanitized, lang: state.lang });
@@ -248,47 +232,32 @@ async function handleSend(){
       const messages = [{ role:'system', content: sys }, { role:'user', content: v.sanitized }];
 
       status.textContent='Generating (local)…';
-      const aiEl = add('assistant','');
-      let streamed = 0;
+      const aiEl = add('assistant',''); let streamed = 0;
       try{
         await WebLLM.generate({
           messages,
           onToken: (tok)=>{
             const t = Budget.approxTokens(tok);
-            if (!Budget.canSpend(t)){
-              warn.textContent='Session token cap reached (35k). Truncating.';
-              return;
-            }
-            streamed += t;
-            aiEl.textContent += tok;
-            chat.scrollTop = chat.scrollHeight;
+            if (!Budget.canSpend(t)){ warn.textContent='Session token cap reached (35k). Truncating.'; return; }
+            streamed += t; aiEl.textContent += tok; chat.scrollTop=chat.scrollHeight;
             if ((Budget.spent + streamed) >= Budget.softWarn && Budget.spent < Budget.softWarn){
               warn.textContent='Approaching session budget (25k).';
             }
           }
         });
-      } catch {
-        // fall through
-      }
+      } catch { /* fall through */ }
 
       if (aiEl.textContent){
         Budget.note(streamed);
         status.textContent=`Ready. (≈${Budget.spent}/${Budget.hardCap})`;
         state.messages.push({ role:'assistant', content: aiEl.textContent });
-
-        // LOG: assistant (WebLLM path)
         if (window.ChattiaLog){
           window.ChattiaLog.put({
-            role: 'assistant',
-            text: aiEl.textContent,
-            lang: state.lang,
-            path: 'webllm',
-            tokens: streamed,
-            provider: 'local-webgpu',
-            sessionTotal: Budget.spent
+            role: 'assistant', text: aiEl.textContent, lang: state.lang,
+            path: 'webllm', tokens: streamed,
+            provider: 'local-webgpu', sessionTotal: Budget.spent
           });
         }
-
         if (Budget.spent >= Budget.hardCap){
           warn.textContent='Session hard cap reached (35k). Further generation disabled.';
         }
@@ -297,7 +266,7 @@ async function handleSend(){
     }
   }
 
-  // 3) Server
+  // 3) Server escalation
   try{
     await sendToServerSSE({
       messages: state.messages.slice(-16),
@@ -306,27 +275,45 @@ async function handleSend(){
       hp: hpInput.value || ''
     });
   } catch {
-    const msg = (state.lang==='es')
-      ? 'Ruta de servidor no disponible en este momento.'
-      : 'Server path unavailable at the moment.';
+    const msg = (state.lang==='es') ? 'Ruta de servidor no disponible en este momento.' : 'Server path unavailable at the moment.';
     add('assistant', msg);
     state.messages.push({ role:'assistant', content: msg });
-
-    // LOG: assistant (server-unavailable)
     if (window.ChattiaLog){
       window.ChattiaLog.put({
-        role: 'assistant',
-        text: msg,
-        lang: state.lang,
-        path: 'server-fail',
-        tokens: 0,
-        provider: 'none',
-        sessionTotal: Budget.spent
+        role: 'assistant', text: msg, lang: state.lang,
+        path: 'server-fail', tokens: 0, provider: 'none', sessionTotal: Budget.spent
       });
     }
-
     status.textContent='Ready.';
   }
+}
+
+// ---------- Insights UI wiring ----------
+async function renderInsights(){
+  if (!panelInsights || !window.ChattiaLog) return;
+  const items = await window.ChattiaLog.latest(30);
+  const lines = items.map(e => {
+    const ts = new Date(e.ts).toLocaleString();
+    const tag = `${e.role}@${e.path}`;
+    const tok = (e.tokens||0);
+    const pvd = e.provider||'';
+    return `[${ts}] ${tag} (${tok}t ${pvd}) — ${e.text}`;
+  });
+  panelInsights.textContent = lines.join('\n') || 'No logs yet.';
+}
+if (btnInsights && panelInsights){
+  btnInsights.addEventListener('click', async ()=>{
+    const isHidden = panelInsights.style.display === 'none' || !panelInsights.style.display;
+    if (isHidden) { panelInsights.style.display = 'block'; await renderInsights(); }
+    else { panelInsights.style.display = 'none'; }
+  });
+}
+if (btnClearLogs && panelInsights){
+  btnClearLogs.addEventListener('click', async ()=>{
+    if (!window.ChattiaLog) return;
+    await window.ChattiaLog.clear();
+    panelInsights.textContent = 'Logs cleared.';
+  });
 }
 
 // ---------- Bind send ----------
@@ -338,5 +325,5 @@ inp.addEventListener('keydown', e=>{
   }
 });
 
-// sync pill
+// initial pill sync
 updateBudgetHint();
