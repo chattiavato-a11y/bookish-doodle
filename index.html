@@ -5,13 +5,13 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Chattia · Local-first + Providers</title>
 
-  <!-- Tight CSP for safety (adjust connect-src if you host API/pack elsewhere) -->
+  <!-- Tight CSP (hashes match the two inline <script> blocks in this file) -->
   <meta http-equiv="Content-Security-Policy"
   content="
     default-src 'self';
     script-src 'self' 'wasm-unsafe-eval'
-      'sha256-rccLydcnnI+ajTPK3SE44BUeyzzeiyUK6sCdqO3vjBw='
-      'sha256-8W9YiE98dsfyo1e8mQ+MI7JoCcg9OI8voiOG3srcyWg=';
+      'sha256-WuKsSRTfQmkHusfwvfCBP9EldUfEJp5PVOCa1okL1SA='
+      'sha256-Im1gyt+FIP9GiX37/0gtI5/Ek2+BeLhL+RQy0ct2Q8c=';
     connect-src 'self';
     img-src 'self' data:;
     style-src 'self' 'unsafe-inline';
@@ -47,18 +47,18 @@
     .insights pre{white-space:pre-wrap;font-size:12px;color:var(--muted);background:transparent;border:none}
   </style>
 
-  <!-- Runtime config (kept simple & same-origin to avoid exposing workers.dev) -->
+  <!-- Runtime config (same-origin; avoids exposing workers.dev) -->
   <script>
     // Use relative paths so the browser only sees your façade origin.
     // If you host UI somewhere else, set FRONTEND_ORIGIN on ops-edge-api and adjust CSP connect-src.
     window.__CHATTIA_CONFIG__ = {
       apiURL: "/api/chat",                    // proxied by ops-edge-api
       packURL: "/packs/site-pack.json",       // proxied by ops-edge-api
-      packSHA256: "xpoXE6JYpgpGW8YJzn3OLyPWCqZxZS17xm7CKPU19Lw=", // optional integrity for the pack (Base64 of SHA-256)
-      // WebLLM (optional local draft). The loader is imported dynamically by l5_webllm.js.
-      webllmScript: "https://esm.run/@mlc-ai/web-llm",
+      packSHA256: "r0TlXepkbtSxxlq71JJB2pMGyJRjPtuTVh65p5Hw8xs=", // integrity for the pack (Base64 of SHA-256)
+      // WebLLM (optional local draft). Host locally to keep CSP strict.
+      webllmScript: "/static/webllm/web-llm.min.js",
       webllmModelId: "Llama-3.1-8B-Instruct-q4f16_1-MLC",
-      webllmAssetsBase: "https://YOUR-CDN.example.com/webllm/models/" // if you host artifacts
+      webllmAssetsBase: "/static/webllm/models/" // model artifacts base (if used)
     };
   </script>
 </head>
@@ -115,4 +115,3 @@
   </script>
 </body>
 </html>
-
