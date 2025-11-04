@@ -7,16 +7,18 @@
 
   <!-- Tight CSP for safety (adjust connect-src if you host API/pack elsewhere) -->
   <meta http-equiv="Content-Security-Policy"
-        content="
-          default-src 'self';
-          script-src 'self' 'wasm-unsafe-eval';
-          connect-src 'self';
-          img-src 'self' data:;
-          style-src 'self' 'unsafe-inline';
-          base-uri 'none';
-          form-action 'self';
-          frame-ancestors 'none';
-        ">
+  content="
+    default-src 'self';
+    script-src 'self' 'wasm-unsafe-eval'
+      'sha256-rccLydcnnI+ajTPK3SE44BUeyzzeiyUK6sCdqO3vjBw='
+      'sha256-8W9YiE98dsfyo1e8mQ+MI7JoCcg9OI8voiOG3srcyWg=';
+    connect-src 'self';
+    img-src 'self' data:;
+    style-src 'self' 'unsafe-inline';
+    base-uri 'none';
+    form-action 'self';
+    frame-ancestors 'none';
+  ">
 
   <style>
     :root{ --bg:#0b0c10; --card:#121319; --ink:#e6e6e6; --muted:#a9b0b8; --ring:rgba(106,209,255,.35); }
@@ -52,7 +54,7 @@
     window.__CHATTIA_CONFIG__ = {
       apiURL: "/api/chat",                    // proxied by ops-edge-api
       packURL: "/packs/site-pack.json",       // proxied by ops-edge-api
-      packSHA256: "",                         // optional integrity for the pack (Base64 of SHA-256)
+      packSHA256: "xpoXE6JYpgpGW8YJzn3OLyPWCqZxZS17xm7CKPU19Lw=", // optional integrity for the pack (Base64 of SHA-256)
       // WebLLM (optional local draft). The loader is imported dynamically by l5_webllm.js.
       webllmScript: "https://esm.run/@mlc-ai/web-llm",
       webllmModelId: "Llama-3.1-8B-Instruct-q4f16_1-MLC",
