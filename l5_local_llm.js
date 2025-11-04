@@ -36,6 +36,7 @@
   })();
 
   // Optional integrity: Base64(SHA-256(bytes)) — NO 'sha256-' prefix
+  // (Matches index.html; update if the JSON bytes change)
   const PACK_SHA256 = (CFG.packSHA256 || "").trim();
 
   // ---- Small utilities ------------------------------------------------------
@@ -45,12 +46,11 @@
 
   function toBase64(buf){
     const b = String.fromCharCode(...new Uint8Array(buf));
-    // btoa expects binary string
     return btoa(b);
   }
 
   async function sha256Base64(buf){
-    if (!crypto?.subtle) return ""; // integrity optional
+    if (!crypto?.subtle) return ""; // integrity optional on older browsers
     const hash = await crypto.subtle.digest("SHA-256", buf);
     return toBase64(hash);
   }
@@ -258,5 +258,7 @@
 
   // ---- Global export --------------------------------------------------------
   global.L5Local = { draft, loadPack, clearCache, last };
+
+  try { log("l5", "ready", { PACK_URL, hasIntegrity: !!PACK_SHA256 }); } catch {}
 
 })(window);
