@@ -7,261 +7,258 @@
 // - Optional sanitization via window.Shield
 // - Plugs into UI via inputEl + callbacks
 
-const LANG_FALLBACKS = {
-  en: 'en-US',
-  es: 'es-419' // prefer LatAm; browser will fall back if unsupported
-};
+// speech.js
+// Centralized speech controls (STT + TTS) for the chat UI.
+// Exposes: window.SpeechController
 
-export class SpeechController {
-  constructor({
-    inputEl,
-    statusEl,
-    warnEl,
-    micBtn,
-    ttsBtn,
-    state,
-    onFinalTranscript, // (text) => void
-    onInterim          // (text) => void
-  } = {}) {
-    this.inputEl   = inputEl  || null;
-    this.statusEl  = statusEl || null;
-    this.warnEl    = warnEl   || null;
-    this.micBtn    = micBtn   || null;
-    this.ttsBtn    = ttsBtn   || null;
+(function (global) {
+  "use strict";
 
-    this.state     = state || {};
-    this.onFinalTranscript = typeof onFinalTranscript === 'function' ? onFinalTranscript : null;
-    this.onInterim = typeof onInterim === 'function' ? onInterim : null;
+  const LANG_FALLBACKS = {
+    en: "en-US",
+    es: "es-419" // Latin America; browsers may fall back to es-ES automatically
+  };
 
-    // STT
-    this.recognition   = null;
-    this.recLang       = this.languageFor(this.state?.lang || 'en');
-    this.recActive     = false;
-    this.finalTranscript = '';
-    this._startAt      = 0; // debounce guard
-
-    // TTS
-    this.synth      = ('speechSynthesis' in window) ? window.speechSynthesis : null;
-    this.voices     = [];
-    this.ttsEnabled = Boolean(this.state?.ttsEnabled);
-
-    this.initRecognition();
-    this.initSynthesis();
-    this.bindButtons();
+  function pickLang(code) {
+    if (!code) return "en-US";
+    const low = String(code).toLowerCase();
+    return LANG_FALLBACKS[low] || (low.includes("-") ? code : `${low}-US`);
   }
 
-  // ---------- Lang helpers ----------
-  languageFor(code) {
-    return LANG_FALLBACKS[code] || `${code || 'en'}-US`;
-  }
-  setLang(code) {
-    this.recLang = this.languageFor(code);
-    if (this.recognition) this.recognition.lang = this.recLang;
-  }
+  // Graceful feature detection
+  const SpeechRecognition =
+    global.SpeechRecognition || global.webkitSpeechRecognition || null;
+  const hasSTT = !!SpeechRecognition;
+  const hasTTS = "speechSynthesis" in global && "SpeechSynthesisUtterance" in global;
 
-  // ---------- Sanitization helper ----------
-  sanitizeText(text) {
-    try {
-      if (window.Shield?.scanAndSanitize) {
-        const r = window.Shield.scanAndSanitize(text, { maxLen: 2000, threshold: 12 });
-        if (!r.ok) {
-          this.warn(`Blocked suspicious input: ${r.reasons?.join(', ') || 'policy'}`);
-          return '';
-        }
-        return r.sanitized || '';
-      }
-      // fallback light scrub
-      return String(text || '').replace(/[<>]/g, c => (c === '<' ? '&lt;' : '&gt;')).trim();
-    } catch {
-      return String(text || '').trim();
-    }
-  }
+  class SpeechController {
+    /**
+     * @param {{
+     *   inputEl: HTMLTextAreaElement,
+     *   statusEl?: HTMLElement,
+     *   warnEl?: HTMLElement,
+     *   micBtn?: HTMLButtonElement,
+     *   ttsBtn?: HTMLButtonElement,
+     *   state?: { lang?: string, ttsEnabled?: boolean },
+     *   onFinalTranscript?: (text:string)=>void
+     * }} opts
+     */
+    constructor(opts = {}) {
+      this.inputEl = opts.inputEl || null;
+      this.statusEl = opts.statusEl || null;
+      this.warnEl = opts.warnEl || null;
+      this.micBtn = opts.micBtn || null;
+      this.ttsBtn = opts.ttsBtn || null;
+      this.state = opts.state || {};
+      this.onFinalTranscript = typeof opts.onFinalTranscript === "function" ? opts.onFinalTranscript : null;
 
-  // ---------- UI helpers ----------
-  setStatus(msg) { if (this.statusEl) this.statusEl.textContent = msg; }
-  warn(msg) { if (this.warnEl) this.warnEl.textContent = msg; }
-
-  // ---------- STT ----------
-  initRecognition() {
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition || !this.micBtn) {
-      if (this.micBtn) {
-        this.micBtn.disabled = true;
-        this.micBtn.title = 'Speech recognition unavailable in this browser.';
-      }
-      return;
-    }
-
-    const rec = new SpeechRecognition();
-    rec.continuous = false;
-    rec.interimResults = true;
-    rec.lang = this.recLang;
-
-    rec.addEventListener('start', () => {
-      this.recActive = true;
-      this.setStatus('Listening…');
-      if (this.micBtn) this.micBtn.setAttribute('aria-pressed', 'true');
-      this.finalTranscript = '';
-      this.warn('');
-    });
-
-    rec.addEventListener('result', (event) => {
-      let interim = '';
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const res = event.results[i];
-        const text = res[0]?.transcript || '';
-        if (res.isFinal) {
-          this.finalTranscript += text + ' ';
-        } else {
-          interim += text;
-        }
-      }
-      const cur = (this.finalTranscript + interim).trim();
-      if (cur) {
-        if (this.inputEl) {
-          this.inputEl.value = cur;
-          this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-        if (this.onInterim) this.onInterim(cur);
-      }
-    });
-
-    rec.addEventListener('error', (event) => {
-      const map = {
-        'no-speech': 'No speech detected. Try again closer to the mic.',
-        'audio-capture': 'No microphone available or not selected.',
-        'not-allowed': 'Microphone blocked. Allow mic permissions in the browser.',
-        'service-not-allowed': 'Speech service disabled by the browser.',
-        'aborted': 'Recognition aborted (another start/stop).',
-        'network': 'Browser STT service had a network error.',
-        'bad-grammar': 'Grammar issue (ignore if not using SRGS).',
-        'language-not-supported': 'Language not supported by this browser.',
-        'invalid-state': 'Recognition already running (debounced).'
-      };
-      const detail = map[event?.error] || `Speech recognition error: ${event?.error || 'unknown'}`;
-      this.warn(detail);
-      this.stopRecognition();
-      this.setStatus('Ready.');
-    });
-
-    rec.addEventListener('end', () => {
-      // 'end' fires for both success and abort/error
-      if (this.micBtn) this.micBtn.setAttribute('aria-pressed', 'false');
+      // ----- STT -----
+      this.recognition = null;
       this.recActive = false;
-      this.setStatus('Ready.');
+      this.finalTranscript = "";
+      this.recLang = pickLang(this.state.lang || "en");
+      if (hasSTT) this._initRecognition();
 
-      const finalText = this.finalTranscript.trim();
-      if (!finalText) return;
+      // ----- TTS -----
+      this.synth = hasTTS ? global.speechSynthesis : null;
+      this.voices = [];
+      this.ttsEnabled = !!this.state.ttsEnabled;
+      if (hasTTS) this._initSynthesis();
 
-      const clean = this.sanitizeText(finalText);
+      // ----- UI -----
+      this._bindButtons();
+    }
+
+    setLang(code) {
+      this.state.lang = code;
+      this.recLang = pickLang(code);
+      if (this.recognition) this.recognition.lang = this.recLang;
+    }
+
+    // ===================== STT =====================
+    _initRecognition() {
+      try {
+        const rec = new SpeechRecognition();
+        rec.continuous = false;          // single utterance
+        rec.interimResults = true;       // show partials in the textarea
+        rec.lang = this.recLang;
+
+        rec.addEventListener("start", () => {
+          this.recActive = true;
+          this.finalTranscript = "";
+          if (this.statusEl) this.statusEl.textContent = "Listening…";
+          if (this.micBtn) this.micBtn.setAttribute("aria-pressed", "true");
+          if (this.warnEl) this.warnEl.textContent = "";
+        });
+
+        rec.addEventListener("result", (ev) => {
+          let interim = "";
+          for (let i = ev.resultIndex; i < ev.results.length; i++) {
+            const res = ev.results[i];
+            const text = (res[0] && res[0].transcript) || "";
+            if (res.isFinal) this.finalTranscript += text + " ";
+            else interim += text;
+          }
+          const combined = (this.finalTranscript + interim).trim();
+          if (combined && this.inputEl) {
+            this.inputEl.value = combined;
+            // Let orchestrator hooks (e.g., Shield) react to input changes
+            this.inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+          }
+        });
+
+        rec.addEventListener("error", (ev) => {
+          const msg = this._humanSTTError(ev?.error);
+          if (this.warnEl) this.warnEl.textContent = msg;
+          this.stopRecognition();
+        });
+
+        rec.addEventListener("end", () => {
+          if (!this.recActive) return;
+          this.recActive = false;
+          if (this.micBtn) this.micBtn.setAttribute("aria-pressed", "false");
+          if (this.statusEl) this.statusEl.textContent = "Ready.";
+          const text = (this.finalTranscript || "").trim();
+          if (text) {
+            if (this.onFinalTranscript) this.onFinalTranscript(text);
+            else if (this.inputEl) {
+              this.inputEl.value = text;
+              this.inputEl.focus();
+            }
+          }
+        });
+
+        this.recognition = rec;
+      } catch {
+        // Disable mic UI if construction failed
+        this.recognition = null;
+      }
+
+      if (this.micBtn && !this.recognition) {
+        this.micBtn.disabled = true;
+        this.micBtn.title = "Speech recognition unavailable in this browser.";
+      }
+    }
+
+    _humanSTTError(code) {
+      switch (code) {
+        case "not-allowed": return "Microphone access denied. Enable permissions to use speech input.";
+        case "no-speech":   return "No speech detected. Try speaking closer to the mic.";
+        case "audio-capture": return "No microphone was found. Check your audio device.";
+        case "aborted":     return "Listening aborted.";
+        case "network":     return "Network issue during recognition.";
+        default:            return "Speech recognition issue. Please retry.";
+      }
+    }
+
+    startRecognition() {
+      if (!this.recognition || this.recActive) return;
+      try {
+        this.recognition.lang = this.recLang;
+        this.recognition.start();
+        if (this.micBtn) this.micBtn.focus();
+      } catch {
+        if (this.warnEl) this.warnEl.textContent = "Unable to start speech recognition.";
+      }
+    }
+
+    stopRecognition() {
+      if (!this.recognition) return;
+      try { this.recognition.stop(); } catch {}
+      this.recActive = false;
+      if (this.micBtn) this.micBtn.setAttribute("aria-pressed", "false");
+      if (this.statusEl && this.statusEl.textContent === "Listening…") {
+        this.statusEl.textContent = "Ready.";
+      }
+    }
+
+    // ===================== TTS =====================
+    _initSynthesis() {
+      const load = () => {
+        try { this.voices = this.synth.getVoices() || []; } catch { this.voices = []; }
+      };
+      load();
+      try {
+        this.synth.addEventListener("voiceschanged", load);
+      } catch { /* some browsers don't fire it */ }
+
+      if (this.ttsBtn) {
+        this.ttsBtn.disabled = false;
+        this.ttsBtn.title = "Toggle narration";
+        this.ttsBtn.setAttribute("aria-pressed", String(this.ttsEnabled));
+        this.ttsBtn.textContent = this.ttsEnabled ? "🔊 On" : "🔇 Off";
+      }
+    }
+
+    _pickVoice(langCode) {
+      if (!this.voices || !this.voices.length) return null;
+      const target = pickLang(langCode || this.state.lang || "en");
+      // exact
+      let v = this.voices.find(v => v.lang === target);
+      if (v) return v;
+      // base match (e.g., 'es' → 'es-*')
+      const base = target.split("-")[0];
+      v = this.voices.find(v => v.lang && v.lang.toLowerCase().startsWith(base));
+      return v || null;
+    }
+
+    narrateAssistant(text, langCode) {
+      if (!this.ttsEnabled || !this.synth) return;
+      const clean = String(text || "").trim();
       if (!clean) return;
 
-      if (typeof this.onFinalTranscript === 'function') {
-        this.onFinalTranscript(clean);
-      } else if (this.inputEl) {
-        this.inputEl.value = clean;
-        this.inputEl.focus();
-        this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+      const u = new SpeechSynthesisUtterance(clean);
+      u.lang = pickLang(langCode || this.state.lang || "en");
+      const v = this._pickVoice(langCode || this.state.lang || "en");
+      if (v) u.voice = v;
+
+      try { this.synth.cancel(); } catch {}
+      try { this.synth.speak(u); } catch {
+        if (this.warnEl) this.warnEl.textContent = "Unable to narrate right now.";
       }
-    });
-
-    this.recognition = rec;
-  }
-
-  startRecognition() {
-    if (!this.recognition || this.recActive) return;
-
-    // debounce starts (prevents invalid-state/aborted churn)
-    const now = Date.now();
-    if (now - this._startAt < 600) return;
-    this._startAt = now;
-
-    // Secure context guard (HTTPS or localhost)
-    const isLocalhost = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
-    if (!isSecureContext && !isLocalhost) {
-      this.warn('Speech input needs HTTPS or localhost.');
-      this.setStatus('Ready.');
-      return;
     }
 
-    try {
-      this.recognition.lang = this.recLang;
-      this.recognition.start();
-      if (this.micBtn) this.micBtn.focus();
-      this.warn('');
-    } catch {
-      this.warn('Unable to start speech recognition.');
+    cancelSpeech() {
+      if (!this.synth) return;
+      try { this.synth.cancel(); } catch {}
     }
-  }
 
-  stopRecognition() {
-    if (!this.recognition) return;
-    try { this.recognition.stop(); } catch { /* no-op */ }
-    this.recActive = false;
-    if (this.micBtn) this.micBtn.setAttribute('aria-pressed', 'false');
-    if (this.statusEl && this.statusEl.textContent === 'Listening…') {
-      this.statusEl.textContent = 'Ready.';
-    }
-  }
+    // ===================== UI wiring =====================
+    _bindButtons() {
+      // Mic
+      if (this.micBtn) {
+        if (!hasSTT) {
+          this.micBtn.disabled = true;
+          this.micBtn.title = "Speech recognition unavailable in this browser.";
+        } else {
+          this.micBtn.type = "button";
+          this.micBtn.addEventListener("click", () => {
+            if (this.recActive) this.stopRecognition();
+            else this.startRecognition();
+          });
+        }
+      }
 
-  // ---------- TTS ----------
-  initSynthesis() {
-    if (!this.synth || !this.ttsBtn) {
+      // TTS
       if (this.ttsBtn) {
-        this.ttsBtn.disabled = true;
-        this.ttsBtn.title = 'Text-to-speech unavailable in this browser.';
+        if (!hasTTS) {
+          this.ttsBtn.disabled = true;
+          this.ttsBtn.title = "Text-to-speech unavailable in this browser.";
+        } else {
+          this.ttsBtn.type = "button";
+          this.ttsBtn.addEventListener("click", () => {
+            this.ttsEnabled = !this.ttsEnabled;
+            if (this.state) this.state.ttsEnabled = this.ttsEnabled;
+            this.ttsBtn.setAttribute("aria-pressed", String(this.ttsEnabled));
+            this.ttsBtn.textContent = this.ttsEnabled ? "🔊 On" : "🔇 Off";
+            if (!this.ttsEnabled) this.cancelSpeech();
+          });
+        }
       }
-      return;
-    }
-    const loadVoices = () => { this.voices = this.synth.getVoices(); };
-    loadVoices();
-    this.synth.addEventListener('voiceschanged', loadVoices);
-  }
-
-  bindButtons() {
-    if (this.micBtn) {
-      this.micBtn.type = 'button';
-      this.micBtn.addEventListener('click', () => {
-        if (this.recActive) this.stopRecognition();
-        else this.startRecognition();
-      });
-    }
-
-    if (this.ttsBtn) {
-      this.ttsBtn.type = 'button';
-      this.ttsBtn.setAttribute('aria-pressed', String(this.ttsEnabled));
-      this.ttsBtn.addEventListener('click', () => {
-        this.ttsEnabled = !this.ttsEnabled;
-        if (this.state) this.state.ttsEnabled = this.ttsEnabled;
-        this.ttsBtn.setAttribute('aria-pressed', String(this.ttsEnabled));
-        this.ttsBtn.textContent = this.ttsEnabled ? '🔊 On' : '🔇 Off';
-        if (!this.ttsEnabled) this.cancelSpeech();
-      });
-      this.ttsBtn.textContent = this.ttsEnabled ? '🔊 On' : '🔇 Off';
     }
   }
 
-  narrationVoice(langCode) {
-    if (!this.voices || !this.voices.length) return null;
-    const target = this.languageFor(langCode);
-    const exact = this.voices.find(v => v.lang === target);
-    if (exact) return exact;
-    const base = target.split('-')[0];
-    return this.voices.find(v => v.lang && v.lang.startsWith(base)) || null;
-  }
+  // expose
+  global.SpeechController = SpeechController;
 
-  narrateAssistant(text, langCode) {
-    if (!this.ttsEnabled || !this.synth || !text) return;
-    const utter = new SpeechSynthesisUtterance(text);
-    const lang = langCode || this.state?.lang || 'en';
-    utter.lang = this.languageFor(lang);
-    const voice = this.narrationVoice(lang);
-    if (voice) utter.voice = voice;
-    try { this.synth.cancel(); } catch {/* no-op */}
-    this.synth.speak(utter);
-  }
-
-  cancelSpeech() {
-    try { if (this.synth) this.synth.cancel(); } catch {/* no-op */}
-  }
-}
+})(window);
