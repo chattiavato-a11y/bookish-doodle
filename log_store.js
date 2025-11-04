@@ -1,72 +1,217 @@
-// log_store.js — local-only logs in IndexedDB, with clear()
+// log_store.js
+// Local, privacy-preserving event logger + Insights panel wiring.
+// Global export: window.ChattiaLog = { add, dump, clear, exportJSON, wireUI, sessionId }
 
-const ChattiaLog = (() => {
-  const DB_NAME = 'chattia_logs';
-  const DB_VER  = 1;
-  const ST_NAME = 'events';
-  let dbPromise = null;
-  let mem = [];
+(function (global) {
+  "use strict";
 
-  function hasIDB(){ return typeof indexedDB !== 'undefined'; }
+  const STORE_KEY   = "chattia.logs.v1";
+  const SESSION_KEY = "chattia.session.v1";
+  const MAX_EVENTS  = 500;       // hard cap
+  const RENDER_MAX  = 200;       // insights render cap
 
-  function openDB(){
-    if (!hasIDB()) return Promise.resolve(null);
-    if (dbPromise) return dbPromise;
-    dbPromise = new Promise((resolve, reject)=>{
-      const req = indexedDB.open(DB_NAME, DB_VER);
-      req.onupgradeneeded = (ev)=>{
-        const db = ev.target.result;
-        if (!db.objectStoreNames.contains(ST_NAME)){
-          const s = db.createObjectStore(ST_NAME, { keyPath: 'id', autoIncrement: true });
-          s.createIndex('by_ts', 'ts', { unique: false });
-        }
+  // Create/restore a per-tab session id
+  const sessionId = (() => {
+    try {
+      let s = sessionStorage.getItem(SESSION_KEY);
+      if (!s) {
+        s = randId(24);
+        sessionStorage.setItem(SESSION_KEY, s);
+      }
+      return s;
+    } catch { return randId(24); }
+  })();
+
+  // In-memory buffer mirrors localStorage
+  let buf = loadBuf();
+
+  // ---------- utils ----------
+  function randId(n = 22) {
+    const abc = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
+    let s = "";
+    for (let i = 0; i < n; i++) s += abc[(Math.random() * abc.length) | 0];
+    return s;
+  }
+
+  function iso() { return new Date().toISOString(); }
+
+  function safeJSONParse(text, fallback = null) {
+    try { return JSON.parse(String(text)); } catch { return fallback; }
+  }
+
+  function saveBuf() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(buf));
+    } catch { /* no-op */ }
+  }
+
+  function loadBuf() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      const arr = safeJSONParse(raw, []);
+      return Array.isArray(arr) ? arr : [];
+    } catch { return []; }
+  }
+
+  // Extremely small redactor for secrets/tokens
+  function redact(obj, depth = 0) {
+    if (obj == null) return obj;
+    if (depth > 4) return "[…]";
+    if (typeof obj === "string") {
+      // redact obvious secrets inside string
+      if (obj.length > 2048) return obj.slice(0, 2048) + "…";
+      return obj.replace(/(sk-[a-z0-9_\-]{10,}|xai-[a-z0-9_\-]{10,}|ya29\.[\w\-\.]+|eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+)/gi, "•REDACTED•");
+    }
+    if (typeof obj !== "object") return obj;
+
+    const out = Array.isArray(obj) ? [] : {};
+    const SECRET_KEY = /token|secret|key|authorization|cookie|passwd|password/i;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (SECRET_KEY.test(k)) {
+        out[k] = "•REDACTED•";
+      } else {
+        out[k] = redact(v, depth + 1);
+      }
+    }
+    return out;
+  }
+
+  // ---------- public API ----------
+  function add(evt) {
+    try {
+      const e = {
+        ts: iso(),
+        sid: sessionId,
+        kind: String(evt?.kind || "log"),
+        msg: String(evt?.msg || ""),
+        meta: redact(evt?.meta ?? null),
       };
-      req.onsuccess = ()=> resolve(req.result);
-      req.onerror = ()=> reject(req.error);
-    });
-    return dbPromise;
+      buf.push(e);
+      if (buf.length > MAX_EVENTS) buf = buf.slice(-MAX_EVENTS);
+      saveBuf();
+      // live-append if insights open
+      appendToInsights(e);
+    } catch { /* no-op */ }
   }
 
-  async function put(entry){
-    const rec = { ts: Date.now(), ...entry };
-    const db = await openDB();
-    if (!db){ mem.push(rec); if (mem.length>500) mem.shift(); return; }
-    await new Promise((resolve, reject)=>{
-      const tx = db.transaction(ST_NAME, 'readwrite');
-      tx.objectStore(ST_NAME).add(rec);
-      tx.oncomplete = resolve; tx.onerror = ()=> reject(tx.error);
-    });
+  function dump() {
+    // return a safe shallow copy
+    return buf.slice(-MAX_EVENTS);
   }
 
-  async function latest(limit=50){
-    const db = await openDB();
-    if (!db) return mem.slice(-limit).reverse();
-    return await new Promise((resolve, reject)=>{
-      const out = [];
-      const tx = db.transaction(ST_NAME, 'readonly');
-      const idx = tx.objectStore(ST_NAME).index('by_ts');
-      const cur = idx.openCursor(null, 'prev');
-      cur.onsuccess = (e)=>{
-        const c = e.target.result;
-        if (!c || out.length>=limit){ resolve(out); return; }
-        out.push(c.value); c.continue();
-      };
-      cur.onerror = ()=> reject(cur.error);
-    });
+  function clear() {
+    buf = [];
+    saveBuf();
+    // also clear UI if open
+    try {
+      const pre = document.getElementById("insightsText");
+      if (pre) pre.textContent = "";
+    } catch { /* no-op */ }
   }
 
-  async function clear(){
-    const db = await openDB();
-    mem = [];
-    if (!db) return;
-    await new Promise((resolve, reject)=>{
-      const tx = db.transaction(ST_NAME, 'readwrite');
-      tx.objectStore(ST_NAME).clear();
-      tx.oncomplete = resolve; tx.onerror = ()=> reject(tx.error);
-    });
+  function exportJSON(pretty = false) {
+    const data = {
+      exported_at: iso(),
+      session: sessionId,
+      events: dump(),
+    };
+    return pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data);
   }
 
-  return { put, latest, clear };
-})();
-window.ChattiaLog = ChattiaLog;
+  // ---------- Insights UI wiring ----------
+  function renderAll() {
+    const pre = document.getElementById("insightsText");
+    if (!pre) return;
+    const head = [
+      `Session: ${sessionId}`,
+      `Events: ${buf.length}`,
+      (() => {
+        try {
+          const l5 = global.L5Local?.last?.();
+          if (!l5) return "L5 last: (n/a)";
+          const ids = (l5.top || []).map(x => x.id).join(", ");
+          return `L5 last: conf=${(l5.confidence||0).toFixed(3)} ids=[${ids}] q="${(l5.query||"").slice(0, 100)}"`;
+        } catch { return "L5 last: (n/a)"; }
+      })(),
+      "",
+      "Recent events:",
+      ""
+    ].join("\n");
 
+    const lines = buf.slice(-RENDER_MAX).map(e =>
+      `[${e.ts}] (${e.kind}) ${e.msg}${e.meta ? " " + tryStringify(e.meta) : ""}`
+    );
+
+    pre.textContent = head + lines.join("\n");
+  }
+
+  function tryStringify(x) {
+    try { return JSON.stringify(x); } catch { return ""; }
+  }
+
+  function togglePanel(show) {
+    const panel = document.getElementById("insightsPanel");
+    if (!panel) return;
+    if (typeof show === "boolean") {
+      panel.style.display = show ? "block" : "none";
+    } else {
+      panel.style.display = panel.style.display === "block" ? "none" : "block";
+    }
+    if (panel.style.display === "block") renderAll();
+  }
+
+  function appendToInsights(e) {
+    const panel = document.getElementById("insightsPanel");
+    const pre   = document.getElementById("insightsText");
+    if (!panel || !pre) return;
+    if (panel.style.display !== "block") return; // only live-append if visible
+    const line = `[${e.ts}] (${e.kind}) ${e.msg}${e.meta ? " " + tryStringify(e.meta) : ""}\n`;
+    pre.textContent += line;
+    // keep pre reasonably small
+    if (pre.textContent.length > 80_000) renderAll();
+  }
+
+  function wireUI() {
+    // Buttons may not exist on some pages; guard accordingly.
+    const insightsBtn = document.getElementById("insightsBtn");
+    const clearBtn    = document.getElementById("clearLogsBtn");
+
+    if (insightsBtn) {
+      insightsBtn.type = "button";
+      insightsBtn.addEventListener("click", () => togglePanel());
+    }
+    if (clearBtn) {
+      clearBtn.type = "button";
+      clearBtn.addEventListener("click", () => {
+        clear();
+        // small toast in status if present
+        try {
+          const s = document.getElementById("status");
+          if (s) s.textContent = "Local logs cleared.";
+        } catch { /* no-op */ }
+      });
+    }
+
+    // Initial render if panel is pre-opened (e.g., dev mode)
+    const panel = document.getElementById("insightsPanel");
+    if (panel && panel.style.display === "block") renderAll();
+  }
+
+  // Auto-wire on DOM ready
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", wireUI, { once: true });
+  } else {
+    // DOM already loaded
+    wireUI();
+  }
+
+  // ---------- expose ----------
+  global.ChattiaLog = {
+    add, dump, clear, exportJSON, wireUI, sessionId
+  };
+
+  // A couple of convenience breadcrumbs so other modules can use:
+  try { add({ kind: "boot", msg: "log_store_ready" }); } catch {}
+
+})(window);
