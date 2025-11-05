@@ -47,23 +47,18 @@
     .insights pre{white-space:pre-wrap;font-size:12px;color:var(--muted);background:transparent;border:none}
   </style>
 
-  <!-- Runtime config (same-origin; avoids exposing workers.dev) -->
   <script>
-    // Use relative paths so the browser only sees your façade origin.
-    // If you host UI somewhere else, set FRONTEND_ORIGIN on ops-edge-api and adjust CSP connect-src.
+   // config.js — no secrets here
    window.__CHATTIA_CONFIG__ = {
-    // Use absolute worker URLs because your UI origin is GitHub Pages
-   apiURL: "https://ops-edge-api.grabem-holdem-nuts-right.workers.dev/api/chat",
-   packURL: "https://ops-edge-api.grabem-holdem-nuts-right.workers.dev/packs/site-pack.json",
-   packSHA256: " ", // integrity for the pack (Base64 of SHA-256)
-    // WebLLM (optional local draft). Host locally to keep CSP strict.
-   webllmScript: "/static/webllm/web-llm.min.js",
+   apiURL: "/api/chat",
+   packURL: "/packs/site-pack.json",
+   packSHA256: "", // leave empty until your pack is final
+   webllmScript: "https://esm.run/@mlc-ai/web-llm",
    webllmModelId: "Llama-3.1-8B-Instruct-q4f16_1-MLC",
-   webllmScript: "https://esm.run/@mlc-ai/web-llm" 
-   webllmAssetsBase: "/static/webllm/models/" // model artifacts base (if used)
+   webllmAssetsBase: "https://YOUR-CDN.example.com/webllm/models/"
    };
-  </script> 
-</head>
+   </script>
+   </head>
   
 <body>
   <div class="wrap">
