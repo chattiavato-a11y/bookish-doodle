@@ -54,13 +54,14 @@
     window.__CHATTIA_CONFIG__ = {
       apiURL: "/api/chat",                    // proxied by ops-edge-api
       packURL: "/packs/site-pack.json",       // proxied by ops-edge-api
-      packSHA256: "r0TlXepkbtSxxlq71JJB2pMGyJRjPtuTVh65p5Hw8xs=", // integrity for the pack (Base64 of SHA-256)
+      packSHA256: " ", // integrity for the pack (Base64 of SHA-256)
       // WebLLM (optional local draft). Host locally to keep CSP strict.
       webllmScript: "/static/webllm/web-llm.min.js",
+      webllmScript: "https://esm.run/@mlc-ai/web-llm"
       webllmModelId: "Llama-3.1-8B-Instruct-q4f16_1-MLC",
       webllmAssetsBase: "/static/webllm/models/" // model artifacts base (if used)
     };
-  </script>
+  </script> 
 </head>
 
 <body>
