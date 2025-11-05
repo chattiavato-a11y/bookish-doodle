@@ -12,7 +12,7 @@
     script-src 'self' 'wasm-unsafe-eval'
       'sha256-WuKsSRTfQmkHusfwvfCBP9EldUfEJp5PVOCa1okL1SA='
       'sha256-Im1gyt+FIP9GiX37/0gtI5/Ek2+BeLhL+RQy0ct2Q8c=';
-    connect-src 'self';
+    connect-src 'self' https://ops-edge-api.grabem-holdem-nuts-right.workers.dev https://ops-pack-host.grabem-holdem-nuts-right.workers.dev;
     img-src 'self' data:;
     style-src 'self' 'unsafe-inline';
     base-uri 'none';
@@ -51,19 +51,20 @@
   <script>
     // Use relative paths so the browser only sees your façade origin.
     // If you host UI somewhere else, set FRONTEND_ORIGIN on ops-edge-api and adjust CSP connect-src.
-    window.__CHATTIA_CONFIG__ = {
-      apiURL: "/api/chat",                    // proxied by ops-edge-api
-      packURL: "/packs/site-pack.json",       // proxied by ops-edge-api
-      packSHA256: " ", // integrity for the pack (Base64 of SHA-256)
-      // WebLLM (optional local draft). Host locally to keep CSP strict.
-      webllmScript: "/static/webllm/web-llm.min.js",
-      webllmScript: "https://esm.run/@mlc-ai/web-llm"
-      webllmModelId: "Llama-3.1-8B-Instruct-q4f16_1-MLC",
-      webllmAssetsBase: "/static/webllm/models/" // model artifacts base (if used)
-    };
+   window.__CHATTIA_CONFIG__ = {
+    // Use absolute worker URLs because your UI origin is GitHub Pages
+   apiURL: "https://ops-edge-api.grabem-holdem-nuts-right.workers.dev/api/chat",
+   packURL: "https://ops-edge-api.grabem-holdem-nuts-right.workers.dev/packs/site-pack.json",
+   packSHA256: " ", // integrity for the pack (Base64 of SHA-256)
+    // WebLLM (optional local draft). Host locally to keep CSP strict.
+   webllmScript: "/static/webllm/web-llm.min.js",
+   webllmModelId: "Llama-3.1-8B-Instruct-q4f16_1-MLC",
+   webllmScript: "https://esm.run/@mlc-ai/web-llm" 
+   webllmAssetsBase: "/static/webllm/models/" // model artifacts base (if used)
+   };
   </script> 
 </head>
-
+  
 <body>
   <div class="wrap">
     <header>
