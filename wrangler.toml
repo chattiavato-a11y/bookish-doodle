@@ -1,10 +1,40 @@
-name = "ops-pack-host"
-main = "pack_worker.js"
+# wrangler.toml — ops-edge-api
+name = "ops-edge-api"
+main = "server_edge.js"
 compatibility_date = "2025-11-01"
 
-# route on your account's workers.dev zone
-routes = ["https://ops-pack-host.grabem-holdem-nuts-right.workers.dev/*"]
+# Route on your workers.dev zone (adjust to your account subdomain if different)
+routes = ["https://ops-edge-api.grabem-holdem-nuts-right.workers.dev/*"]
 
-[[kv_namespaces]]
-binding = "PACK_KV"
-id = "f01123d0eaae4affb0cb764f2486bb0c"   # will be created below
+[vars]
+# Keep UI same-origin if you serve the frontend with this worker as a reverse proxy.
+# If your UI lives on a different origin, set it here (e.g., "https://ui.example.com")
+# FRONTEND_ORIGIN = "https://your-ui.example.com"
+
+# REQUIRED: where the knowledge pack actually lives (usually your pack worker)
+PACK_URL = "https://ops-pack-host.grabem-holdem-nuts-right.workers.dev/packs/site-pack.json"
+
+# Toggle providers & their order
+ENABLE_PROVIDERS = "true"
+PROVIDER_CHAIN = "oss,gemini,openai"
+
+# --- OSS (OpenAI-compatible) ---
+# Example: Together, OpenRouter, vLLM/llama.cpp behind a public URL, etc.
+# Use HTTPS public endpoints only (no localhost)
+OSS_BASE_URL = "https://api.together.xyz/v1"
+OSS_MODEL_ID = "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo"
+
+# --- Gemini ---
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_MODEL_ID = "gemini-2.5-flash"
+
+# --- OpenAI ---
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_MODEL_ID = "gpt-4o-mini"
+
+# Secrets (add via: wrangler secret put <NAME>)
+# OSS_API_KEY
+# GEMINI_API_KEY
+# OPENAI_API_KEY
+# (Optional) GROK_API_KEY if you add GROK_* vars and include "grok" in PROVIDER_CHAIN
+
