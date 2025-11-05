@@ -567,3 +567,389 @@ function describeServerError(err){
 
   return fallback;
 }
+
+// l6_orchestrator.js
+// UI glue + Guardrails + Escalation ladder (L5 → optional WebLLM → L7 server).
+// Relies on globals provided by index.html script order:
+//   Shield (shield.js), ChattiaLog (log_store.js), SpeechController (speech.js),
+//   L5Local (l5_local_llm.js), L5WebLLM (l5_webllm.js)
+
+(function (global){
+  "use strict";
+
+  // ---------- helpers ----------
+  const Q = (s)=>document.querySelector(s);
+  const log = (kind,msg,meta)=>{ try{ global.ChattiaLog?.add?.({kind,msg,meta}); }catch{} };
+
+  // ---------- config ----------
+  const CFG = global.__CHATTIA_CONFIG__ || {};
+  const API_URL  = CFG.apiURL  || "/api/chat";
+  const PACK_URL = CFG.packURL || "/packs/site-pack.json";
+
+  // token budgeting (only for server/provider path)
+  const SOFT_CAP = 25_000;  // warn
+  const HARD_CAP = 35_000;  // block
+  const TOKENS_PER_CHAR = 1/4;
+
+  // L5 thresholds
+  const L5_MIN_CONF = 0.60;
+  const L5_COVERAGE = 2;
+
+  // ---------- state ----------
+  const state = {
+    theme: "dark",
+    lang: "en",
+    messages: [],
+    csrf: Shield.csrfToken(),
+    ttsEnabled: false,
+    providerTokens: 0,   // counts ONLY server/provider usage
+    sending: false
+  };
+
+  // ---------- DOM ----------
+  const els = {
+    form:   Q("#chatForm"),
+    chat:   Q("#chat"),
+    inp:    Q("#input"),
+    send:   Q("#send"),
+    status: Q("#status"),
+    warn:   Q("#warn"),
+    themeBtn: Q("#themeBtn"),
+    langSel:  Q("#langSel"),
+    micBtn:   Q("#micBtn"),
+    ttsBtn:   Q("#ttsBtn"),
+    // Insights (optional)
+    insBtn:   Q("#insightsBtn"),
+    clrBtn:   Q("#clearLogsBtn"),
+    insPanel: Q("#insightsPanel"),
+    insText:  Q("#insightsText") || (Q("#insightsPanel")?.querySelector("pre"))
+  };
+
+  // honeypot
+  const hpEl = Shield.attachHoneypot(els.form);
+
+  // speech
+  const speech = new SpeechController({
+    inputEl: els.inp,
+    statusEl: els.status,
+    warnEl: els.warn,
+    micBtn: els.micBtn,
+    ttsBtn: els.ttsBtn,
+    state,
+    onFinalTranscript(txt){ try{ els.inp.value = txt; els.inp.focus(); }catch{} }
+  });
+
+  // ---------- UI wiring ----------
+  if (els.themeBtn){
+    els.themeBtn.addEventListener("click", ()=>{
+      state.theme = state.theme === "dark" ? "light" : "dark";
+      document.documentElement.dataset.theme = state.theme;
+      els.themeBtn.textContent = state.theme[0].toUpperCase()+state.theme.slice(1);
+      log("ui","theme_toggle",{ theme: state.theme });
+    });
+  }
+  if (els.langSel){
+    els.langSel.addEventListener("change", e=>{
+      state.lang = String(e.target.value || "en");
+      try { speech.setLang(state.lang); } catch {}
+      log("ui","lang_change",{ lang: state.lang });
+    });
+  }
+
+  if (els.send){
+    els.send.addEventListener("click", ()=> sendFlow());
+  }
+  if (els.inp){
+    els.inp.addEventListener("keydown", (e)=>{
+      if (e.key === "Enter" && !e.shiftKey){
+        e.preventDefault();
+        sendFlow();
+      }
+    });
+  }
+
+  // ---------- render helpers ----------
+  function addMsg(role, text){
+    const div = document.createElement("div");
+    div.className = "msg " + (role === "user" ? "me" : "ai");
+    div.textContent = String(text || "");           // safe echo
+    els.chat.appendChild(div);
+    els.chat.scrollTop = els.chat.scrollHeight;
+    return div;
+  }
+  const setStatus = (s)=>{ if (els.status) els.status.textContent = s || ""; };
+  const setWarn   = (s)=>{ if (els.warn)   els.warn.textContent   = s || ""; };
+
+  function clientGate(raw){
+    const r = Shield.scanAndSanitize(raw, { maxLen: 2000, threshold: 12 });
+    if (!r.ok){
+      setWarn(`Blocked by client Shield. Reasons: ${r.reasons.join(", ")}`);
+      log("guard","blocked_client",{ reasons: r.reasons });
+      return { ok:false };
+    }
+    setWarn("");
+    return { ok:true, text: r.sanitized };
+  }
+
+  // ---------- local pack fallback helpers ----------
+  async function loadPack(){
+    if (global.__PACK__) return global.__PACK__;
+    const res = await fetch(PACK_URL, { headers: { "Accept":"application/json" }, cache:"no-store" });
+    if (!res.ok) throw new Error("pack_load_failed");
+    global.__PACK__ = await res.json();
+    return global.__PACK__;
+  }
+  function tok(s){ return (String(s||"").toLowerCase().normalize("NFKC").match(/[a-z0-9áéíóúüñ]+/gi)) || []; }
+  function strongFromPack(pack, query, lang){
+    const terms = tok(query);
+    const out = [];
+    for (const d of (pack?.docs||[])){
+      if (lang && d.lang && d.lang !== lang) continue;
+      for (const c of (d.chunks||[])){
+        const tt = tok(c.text);
+        let score = 0; for (const w of terms) if (tt.includes(w)) score++;
+        if (score>0) out.push({ id:c.id, text:c.text, score });
+      }
+    }
+    return out.sort((a,b)=>b.score-a.score).slice(0,4);
+  }
+  async function offlinePackFallback(query, lang){
+    let pack;
+    try { pack = await loadPack(); }
+    catch {
+      return {
+        text: lang==='es'
+          ? 'Modo fuera de línea: no se pudo cargar packs/site-pack.json. Asegura el hosting o configura PACK_URL.'
+          : 'Offline mode: packs/site-pack.json could not be loaded. Host it or set PACK_URL.',
+        reason: 'pack-load-failed'
+      };
+    }
+    const strong = strongFromPack(pack, query, lang);
+    if (!strong.length){
+      return {
+        text: lang==='es'
+          ? 'Modo fuera de línea: no hay contexto local suficiente. Inicia /api/chat para proveedores.'
+          : 'Offline mode: the local pack has no matches. Start /api/chat to enable providers.',
+        reason: 'no-local-match'
+      };
+    }
+    const lead = lang==='es'
+      ? 'Modo fuera de línea: respondiendo solo con el paquete local.'
+      : 'Offline mode: answering using the local knowledge pack only.';
+    const body = strong.map(t=>`[#${t.id}] ${t.text}`).join('\n\n');
+    return { text: `${lead}\n\n${body}`, reason: 'local-context', strongCount: strong.length };
+  }
+
+  // ---------- server SSE ----------
+  async function serverStream(){
+    if (state.providerTokens >= HARD_CAP){
+      setWarn("Session hard cap reached (35k tokens). Start a new session.");
+      log("budget","hard_cap_block",{ used: state.providerTokens });
+      return;
+    }
+    if (state.providerTokens >= SOFT_CAP){
+      setWarn("Approaching session limit; continuing may end the session soon.");
+      log("budget","soft_cap_warn",{ used: state.providerTokens });
+    }
+
+    setStatus("Connecting to server …");
+    state.sending = true;
+    const aiEl = addMsg("assistant", "");
+    let full = "";
+
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type":"application/json", "X-CSRF": state.csrf },
+        body: JSON.stringify({
+          messages: state.messages.slice(-16),
+          lang: state.lang,
+          csrf: state.csrf,
+          hp: hpEl?.value || ""
+        })
+      });
+
+      if (!res.ok || !res.body){
+        setStatus("Server refused the request.");
+        setWarn("Offline mode: local pack only or API unavailable.");
+        log("l7","server_bad",{ status: res.status });
+        return;
+      }
+
+      setStatus("Streaming …");
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+
+      while(true){
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = dec.decode(value, { stream:true });
+        for (const line of chunk.split("\n")){
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[END]") continue;
+          full += data;
+          aiEl.textContent = full;
+          els.chat.scrollTop = els.chat.scrollHeight;
+
+          state.providerTokens += Math.ceil(data.length * TOKENS_PER_CHAR);
+          if (state.providerTokens >= HARD_CAP){
+            setWarn("Hard cap reached mid-stream; stopping.");
+            log("budget","hard_cap_midstream",{ used: state.providerTokens });
+            try { reader.cancel(); } catch {}
+            break;
+          }
+        }
+      }
+
+      full = (full||"").trim();
+      if (!full){
+        setWarn("No content streamed from server.");
+        log("l7","empty_stream");
+        return;
+      }
+
+      state.messages.push({ role:"assistant", content: full });
+      setStatus("Ready.");
+      try { speech.narrateAssistant(full, state.lang); } catch {}
+      log("l7","server_answer_ok",{ chars: full.length, used: state.providerTokens });
+
+    } catch (e){
+      setStatus("Server error.");
+      setWarn("Couldn’t reach the API. Using local-only answers when possible.");
+      log("l7","server_fetch_error",{ err:String(e?.message||e) });
+    } finally {
+      state.sending = false;
+    }
+  }
+
+  // ---------- main send flow ----------
+  async function sendFlow(){
+    if (state.sending) return;
+    const raw = (els.inp.value||"").trim();
+    if (!raw) return;
+
+    speech.cancelSpeech();
+
+    // client shield before echo
+    const v1 = clientGate(raw);
+    if (!v1.ok) return;
+
+    // echo sanitized
+    addMsg("user", v1.text);
+    state.messages.push({ role:"user", content: v1.text, lang: state.lang });
+    els.inp.value = "";
+
+    // second pass
+    const v2 = clientGate(v1.text);
+    if (!v2.ok) return;
+
+    // L5 local extractive
+    setStatus("Thinking locally (L5) …");
+    log("l6","try_l5",{ lang: state.lang });
+
+    try{
+      const extractive = await global.L5Local?.draft?.({
+        query: v2.text, lang: state.lang,
+        bm25Min: L5_MIN_CONF, coverageNeeded: L5_COVERAGE
+      });
+
+      if (extractive){
+        const ai = addMsg("assistant", extractive);
+        state.messages.push({ role:"assistant", content: extractive });
+        setStatus("Ready.");
+        try { speech.narrateAssistant(extractive, state.lang); } catch {}
+        log("l6","l5_answer_ok",{ chars: extractive.length, pack: PACK_URL });
+        return;
+      }
+    } catch(e){
+      log("l6","l5_error",{ err:String(e?.message||e) });
+    }
+
+    // Optional WebLLM (local WebGPU), if present
+    if (global.L5WebLLM?.supported?.()){
+      try{
+        setStatus("Loading on-device model (WebLLM)…");
+        const aiEl = addMsg("assistant", "");
+        const controller = new AbortController();
+
+        // derive tiny grounded system from pack (best-effort)
+        let sys = "You are a concise assistant.";
+        try {
+          const pack = await loadPack();
+          const strong = strongFromPack(pack, v2.text, state.lang);
+          const ctx = strong.map(t=>`[#${t.id}] ${t.text}`).join('\n');
+          const policy = (state.lang==='es')
+            ? "Responde SOLO con el contexto. Si falta info, dilo. Cita [#id]."
+            : "Answer ONLY using the context. If info is missing, say so. Cite [#id].";
+          const style  = (state.lang==='es') ? "Sé conciso." : "Be concise.";
+          sys = `${policy}\n${style}\n\nContext:\n${ctx}`;
+        } catch {}
+
+        const full = await global.L5WebLLM.generate?.({
+          system: sys,
+          messages: state.messages.slice(-12),
+          temperature: 0.2,
+          maxTokens: 220,
+          onDelta: (t)=>{
+            aiEl.textContent += t;
+            els.chat.scrollTop = els.chat.scrollHeight;
+          },
+          signal: controller.signal
+        });
+
+        if (full && full.trim()){
+          state.messages.push({ role:"assistant", content: full.trim() });
+          setStatus("Ready.");
+          try { speech.narrateAssistant(full, state.lang); } catch {}
+          log("l6","webllm_answer_ok",{ chars: full.length });
+          return;
+        }
+      } catch(e){
+        log("l6","webllm_error",{ err:String(e?.message||e) });
+      }
+    } else {
+      log("l6","webllm_missing_or_unsupported");
+    }
+
+    // Escalate to server (L7 providers behind /api/chat)
+    await serverStream();
+  }
+
+  // ---------- insights (optional) ----------
+  async function renderInsights(){
+    if (!els.insPanel || !els.insText || !global.ChattiaLog) return;
+    const items = await global.ChattiaLog.latest(30);
+    const lines = items.map(e=>{
+      const ts = new Date(e.ts).toLocaleString();
+      const tag = `${e.role}@${e.path}`;
+      const tok = (e.tokens||0);
+      const pvd = e.provider||'';
+      return `[${ts}] ${tag} (${tok}t ${pvd}) — ${e.text}`;
+    });
+    els.insText.textContent = lines.join('\n') || 'No logs yet.';
+  }
+  if (els.insBtn && els.insPanel){
+    els.insBtn.addEventListener("click", async ()=>{
+      const hidden = !els.insPanel.style.display || els.insPanel.style.display === "none";
+      if (hidden){ els.insPanel.style.display = "block"; await renderInsights(); }
+      else       { els.insPanel.style.display = "none"; }
+    });
+  }
+  if (els.clrBtn && els.insPanel){
+    els.clrBtn.addEventListener("click", async ()=>{
+      try { await global.ChattiaLog?.clear?.(); } catch {}
+      if (els.insText) els.insText.textContent = "Logs cleared.";
+    });
+  }
+
+  // ---------- bind send ----------
+  els.send?.addEventListener("click", sendFlow);
+  els.inp?.addEventListener("keydown", (e)=>{
+    if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); sendFlow(); }
+  });
+
+  // ---------- boot log ----------
+  log("boot","l6_ready",{ api: API_URL, pack: PACK_URL, softCap: SOFT_CAP, hardCap: HARD_CAP });
+
+})(window);
