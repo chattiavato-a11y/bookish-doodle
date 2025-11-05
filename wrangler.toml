@@ -2,6 +2,12 @@
 name = "ops-edge-api"
 main = "server_edge.js"
 compatibility_date = "2025-11-01"
+name = "ops-pack-host"
+main = "pack_worker.js"
+compatibility_date = "2025-11-01"
+workers_dev = true
+binding = "PACK_KV"
+id = "f01123d0eaae4affb0cb764f2486bb0c"   # use the existing namespace id
 
 # Route on your workers.dev zone (adjust to your account subdomain if different)
 routes = ["https://ops-edge-api.grabem-holdem-nuts-right.workers.dev/*"]
